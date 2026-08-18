@@ -3,6 +3,7 @@ import sys
 import math
 import threading
 import json
+import hashlib
 import websocket
 
 
@@ -27,19 +28,43 @@ SERVER_URL = "wss://mymultiplayergame.onrender.com/ws"
 
 pygame.init()
 
-screen = pygame.display.set_mode((WIDTH, HEIGHT))
-pygame.display.set_caption("Multiplayer Game")
+screen = pygame.display.set_mode(
+    (WIDTH, HEIGHT)
+)
+
+pygame.display.set_caption(
+    "Multiplayer Game"
+)
 
 clock = pygame.time.Clock()
 
-font = pygame.font.SysFont(None, 32)
+font = pygame.font.SysFont(
+    None,
+    32
+)
+
+input_font = pygame.font.SysFont(
+    None,
+    42
+)
+
+
+# ============================================================
+# Реєстрація
+# ============================================================
+
+nickname = ""
+
+registration_done = False
+
+input_active = True
 
 
 # ============================================================
 # Мій гравець
 # ============================================================
 
-my_name = "Connecting..."
+my_id = None
 
 player_x = WIDTH / 2
 player_y = HEIGHT / 2
@@ -57,7 +82,42 @@ other_players = {}
 # ============================================================
 
 ws = None
+
 connected = False
+
+
+# ============================================================
+# Колір з ніку
+# ============================================================
+
+def nickname_color(name):
+
+    # SHA-256 дає однаковий результат
+    # на всіх комп'ютерах
+
+    digest = hashlib.sha256(
+        name.encode("utf-8")
+    ).digest()
+
+
+    # Беремо перші 3 байти
+
+    r = digest[0]
+    g = digest[1]
+    b = digest[2]
+
+
+    # Не дозволяємо отримати
+    # занадто темний колір
+
+    minimum = 80
+
+    r = max(r, minimum)
+    g = max(g, minimum)
+    b = max(b, minimum)
+
+
+    return (r, g, b)
 
 
 # ============================================================
@@ -66,7 +126,7 @@ connected = False
 
 def receive_messages():
 
-    global my_name
+    global my_id
     global connected
     global other_players
 
@@ -79,97 +139,142 @@ def receive_messages():
             if not message:
                 break
 
+
             data = json.loads(message)
 
-            message_type = data.get("type")
+            message_type = data.get("t")
 
 
-            # ------------------------------------------------
-            # Наше ім'я
-            # ------------------------------------------------
+            # =================================================
+            # Наш ID
+            # =================================================
 
-            if message_type == "welcome":
+            if message_type == "w":
 
-                my_name = data["name"]
+                my_id = data["i"]
 
-                print("You are:", my_name)
-
-
-            # ------------------------------------------------
-            # Початковий список гравців
-            # ------------------------------------------------
-
-            elif message_type == "players":
-
-                server_players = data["players"]
-
-                for name, position in server_players.items():
-
-                    if name == my_name:
-                        continue
-
-                    if name not in other_players:
-
-                        other_players[name] = {
-                            "x": position["x"],
-                            "y": position["y"],
-                            "target_x": position["x"],
-                            "target_y": position["y"]
-                        }
-
-                    else:
-
-                        other_players[name]["target_x"] = position["x"]
-                        other_players[name]["target_y"] = position["y"]
+                print(
+                    "Your ID:",
+                    my_id
+                )
 
 
-            # ------------------------------------------------
-            # Зміна позиції ОДНОГО гравця
-            # ------------------------------------------------
+            # =================================================
+            # Існуючі гравці
+            # =================================================
 
-            elif message_type == "position":
+            elif message_type == "s":
 
-                name = data["name"]
+                for player in data["p"]:
 
-                # Ніколи не додаємо самого себе
-                if name == my_name:
+                    player_id = player["i"]
+
+                    other_players[player_id] = {
+
+                        "name": player["n"],
+
+                        "x": player["x"],
+
+                        "y": player["y"],
+
+                        "target_x": player["x"],
+
+                        "target_y": player["y"]
+                    }
+
+
+            # =================================================
+            # Новий гравець
+            # =================================================
+
+            elif message_type == "j":
+
+                player_id = data["i"]
+
+
+                if player_id == my_id:
                     continue
+
+
+                other_players[player_id] = {
+
+                    "name": data["n"],
+
+                    "x": data["x"],
+
+                    "y": data["y"],
+
+                    "target_x": data["x"],
+
+                    "target_y": data["y"]
+                }
+
+
+            # =================================================
+            # Позиція
+            # =================================================
+
+            elif message_type == "p":
+
+                player_id = data["i"]
+
+
+                # Самого себе ігноруємо
+
+                if player_id == my_id:
+                    continue
+
 
                 x = data["x"]
                 y = data["y"]
 
 
-                if name not in other_players:
+                if player_id not in other_players:
 
-                    other_players[name] = {
+                    other_players[player_id] = {
+
+                        "name": "Player",
+
                         "x": x,
+
                         "y": y,
+
                         "target_x": x,
+
                         "target_y": y
                     }
 
                 else:
 
-                    other_players[name]["target_x"] = x
-                    other_players[name]["target_y"] = y
+                    other_players[player_id][
+                        "target_x"
+                    ] = x
+
+                    other_players[player_id][
+                        "target_y"
+                    ] = y
 
 
-            # ------------------------------------------------
+            # =================================================
             # Гравець вийшов
-            # ------------------------------------------------
+            # =================================================
 
-            elif message_type == "player_left":
+            elif message_type == "l":
 
-                name = data["name"]
+                player_id = data["i"]
 
-                if name in other_players:
-
-                    del other_players[name]
+                other_players.pop(
+                    player_id,
+                    None
+                )
 
 
     except Exception as e:
 
-        print("WebSocket error:", e)
+        print(
+            "WebSocket error:",
+            e
+        )
 
         connected = False
 
@@ -185,7 +290,9 @@ def connect_to_server():
 
     try:
 
-        print("Connecting to server...")
+        print(
+            "Connecting to server..."
+        )
 
         ws = websocket.create_connection(
             SERVER_URL
@@ -195,7 +302,10 @@ def connect_to_server():
 
         connected = True
 
-        print("Connected!")
+        print(
+            "Connected!"
+        )
+
 
         thread = threading.Thread(
             target=receive_messages,
@@ -204,11 +314,53 @@ def connect_to_server():
 
         thread.start()
 
+
     except Exception as e:
 
-        print("Connection failed:", e)
+        print(
+            "Connection failed:",
+            e
+        )
 
         connected = False
+
+
+# ============================================================
+# Реєстрація на сервері
+# ============================================================
+
+def register():
+
+    if not connected:
+        return
+
+
+    try:
+
+        ws.send(
+
+            json.dumps(
+                {
+                    "t": "r",
+                    "n": nickname
+                },
+                separators=(",", ":")
+            )
+        )
+
+
+        print(
+            "Registered as:",
+            nickname
+        )
+
+
+    except Exception as e:
+
+        print(
+            "Registration error:",
+            e
+        )
 
 
 # ============================================================
@@ -220,27 +372,37 @@ def send_position():
     if not connected:
         return
 
+
     try:
 
-        # Передаємо тільки цілі координати
-        x = int(round(player_x))
-        y = int(round(player_y))
-
-        # Компактний JSON без зайвих пробілів
-        message = json.dumps(
-            {
-                "type": "position",
-                "x": x,
-                "y": y
-            },
-            separators=(",", ":")
+        x = int(
+            round(player_x)
         )
 
-        ws.send(message)
+        y = int(
+            round(player_y)
+        )
+
+
+        ws.send(
+
+            json.dumps(
+                {
+                    "t": "p",
+                    "x": x,
+                    "y": y
+                },
+                separators=(",", ":")
+            )
+        )
+
 
     except Exception as e:
 
-        print("Send error:", e)
+        print(
+            "Send error:",
+            e
+        )
 
 
 # ============================================================
@@ -251,14 +413,13 @@ connect_to_server()
 
 
 # ============================================================
-# Таймер відправки
+# Таймер
 # ============================================================
 
 send_timer = 0.0
 
 was_moving = False
 
-# Остання позиція, яку реально відправили
 last_sent_x = None
 last_sent_y = None
 
@@ -268,6 +429,7 @@ last_sent_y = None
 # ============================================================
 
 running = True
+
 
 while running:
 
@@ -285,6 +447,103 @@ while running:
             running = False
 
 
+        # ====================================================
+        # Введення ніку
+        # ====================================================
+
+        if not registration_done:
+
+            if event.type == pygame.KEYDOWN:
+
+                if event.key == pygame.K_RETURN:
+
+                    nickname = nickname.strip()
+
+                    if nickname:
+
+                        registration_done = True
+
+                        register()
+
+
+                elif event.key == pygame.K_BACKSPACE:
+
+                    nickname = nickname[:-1]
+
+
+                else:
+
+                    if len(nickname) < 10:
+
+                        if event.unicode.isprintable():
+
+                            nickname += event.unicode
+
+
+    # ========================================================
+    # Екран реєстрації
+    # ========================================================
+
+    if not registration_done:
+
+        screen.fill(
+            (100, 100, 100)
+        )
+
+
+        title = input_font.render(
+            "Enter your nickname:",
+            True,
+            (255, 255, 255)
+        )
+
+
+        screen.blit(
+            title,
+            (
+                WIDTH // 2 - title.get_width() // 2,
+                250
+            )
+        )
+
+
+        nickname_text = input_font.render(
+            nickname,
+            True,
+            (255, 255, 255)
+        )
+
+
+        screen.blit(
+            nickname_text,
+            (
+                WIDTH // 2 - nickname_text.get_width() // 2,
+                330
+            )
+        )
+
+
+        info = font.render(
+            f"{len(nickname)}/10   Press ENTER",
+            True,
+            (220, 220, 220)
+        )
+
+
+        screen.blit(
+            info,
+            (
+                WIDTH // 2 - info.get_width() // 2,
+                400
+            )
+        )
+
+
+        pygame.display.flip()
+
+        continue
+
+
     # ========================================================
     # Керування
     # ========================================================
@@ -293,6 +552,7 @@ while running:
 
     dx = 0
     dy = 0
+
 
     if keys[pygame.K_a] or keys[pygame.K_LEFT]:
         dx -= 1
@@ -313,7 +573,10 @@ while running:
 
     if dx != 0 or dy != 0:
 
-        length = math.sqrt(dx * dx + dy * dy)
+        length = math.sqrt(
+            dx * dx +
+            dy * dy
+        )
 
         dx /= length
         dy /= length
@@ -323,8 +586,17 @@ while running:
     # Рух
     # ========================================================
 
-    player_x += dx * PLAYER_SPEED * dt
-    player_y += dy * PLAYER_SPEED * dt
+    player_x += (
+        dx *
+        PLAYER_SPEED *
+        dt
+    )
+
+    player_y += (
+        dy *
+        PLAYER_SPEED *
+        dt
+    )
 
 
     # ========================================================
@@ -333,38 +605,54 @@ while running:
 
     half = PLAYER_SIZE / 2
 
+
     player_x = max(
         half,
-        min(WIDTH - half, player_x)
+        min(
+            WIDTH - half,
+            player_x
+        )
     )
+
 
     player_y = max(
         half,
-        min(HEIGHT - half, player_y)
+        min(
+            HEIGHT - half,
+            player_y
+        )
     )
 
 
     # ========================================================
-    # Мережева логіка
+    # Відправлення
     # ========================================================
 
-    is_moving = dx != 0 or dy != 0
+    is_moving = (
+        dx != 0 or
+        dy != 0
+    )
 
 
     if is_moving:
 
         send_timer += dt
 
+
         if send_timer >= 0.1:
 
             send_timer = 0.0
 
-            current_x = int(round(player_x))
-            current_y = int(round(player_y))
+
+            current_x = int(
+                round(player_x)
+            )
+
+            current_y = int(
+                round(player_y)
+            )
 
 
-            # Відправляємо тільки якщо координати
-            # реально змінилися
             if (
                 current_x != last_sent_x
                 or
@@ -379,11 +667,13 @@ while running:
 
     elif was_moving:
 
-        # Гравець щойно зупинився.
-        # Відправляємо фінальну позицію.
+        current_x = int(
+            round(player_x)
+        )
 
-        current_x = int(round(player_x))
-        current_y = int(round(player_y))
+        current_y = int(
+            round(player_y)
+        )
 
 
         if (
@@ -405,19 +695,23 @@ while running:
 
 
     # ========================================================
-    # Плавний рух інших гравців
+    # Плавність інших гравців
     # ========================================================
 
     interpolation_speed = 12
 
+
     for player in other_players.values():
 
         player["x"] += (
-            player["target_x"] - player["x"]
+            player["target_x"] -
+            player["x"]
         ) * interpolation_speed * dt
 
+
         player["y"] += (
-            player["target_y"] - player["y"]
+            player["target_y"] -
+            player["y"]
         ) * interpolation_speed * dt
 
 
@@ -425,85 +719,163 @@ while running:
     # Малювання
     # ========================================================
 
-    screen.fill((30, 30, 30))
+    screen.fill(
+        (30, 30, 30)
+    )
 
 
-    # --------------------------------------------------------
+    # ========================================================
     # Інші гравці
-    # --------------------------------------------------------
+    # ========================================================
 
-    for name, player in other_players.items():
+    for player in other_players.values():
+
+        color = nickname_color(
+            player["name"]
+        )
+
 
         pygame.draw.rect(
+
             screen,
-            (255, 0, 0),
+
+            color,
+
             (
-                int(player["x"] - half),
-                int(player["y"] - half),
+                int(
+                    player["x"] -
+                    half
+                ),
+
+                int(
+                    player["y"] -
+                    half
+                ),
+
                 PLAYER_SIZE,
+
                 PLAYER_SIZE
             )
         )
 
+
         text = font.render(
-            name,
+
+            player["name"],
+
             True,
+
             (255, 255, 255)
         )
 
+
         screen.blit(
+
             text,
+
             (
-                int(player["x"] - text.get_width() / 2),
-                int(player["y"] - half - 30)
+                int(
+                    player["x"] -
+                    text.get_width() / 2
+                ),
+
+                int(
+                    player["y"] -
+                    half -
+                    30
+                )
             )
         )
 
 
-    # --------------------------------------------------------
+    # ========================================================
     # Наш гравець
-    # --------------------------------------------------------
+    # ========================================================
+
+    my_color = nickname_color(
+        nickname
+    )
+
 
     pygame.draw.rect(
+
         screen,
-        (255, 0, 0),
+
+        my_color,
+
         (
-            int(player_x - half),
-            int(player_y - half),
+            int(
+                player_x -
+                half
+            ),
+
+            int(
+                player_y -
+                half
+            ),
+
             PLAYER_SIZE,
+
             PLAYER_SIZE
         )
     )
 
+
     text = font.render(
-        my_name,
+
+        nickname,
+
         True,
+
         (255, 255, 255)
     )
 
+
     screen.blit(
+
         text,
+
         (
-            int(player_x - text.get_width() / 2),
-            int(player_y - half - 30)
+            int(
+                player_x -
+                text.get_width() / 2
+            ),
+
+            int(
+                player_y -
+                half -
+                30
+            )
         )
     )
 
 
-    # --------------------------------------------------------
+    # ========================================================
     # Статус
-    # --------------------------------------------------------
+    # ========================================================
 
-    status = "ONLINE" if connected else "OFFLINE"
+    status = (
+        "ONLINE"
+        if connected
+        else
+        "OFFLINE"
+    )
+
 
     status_text = font.render(
+
         status,
+
         True,
+
         (255, 255, 255)
     )
 
+
     screen.blit(
+
         status_text,
+
         (10, 10)
     )
 
@@ -518,10 +890,14 @@ while running:
 if ws:
 
     try:
+
         ws.close()
+
     except:
+
         pass
 
 
 pygame.quit()
+
 sys.exit()

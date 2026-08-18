@@ -1,4 +1,3 @@
-import asyncio
 import json
 import os
 
@@ -15,67 +14,34 @@ app = FastAPI()
 
 players = {}
 
-
-# ============================================================
-# Отримати вільний номер
-# ============================================================
-
-def get_player_name():
-
-    number = 1
-
-    while f"Player{number}" in players:
-        number += 1
-
-    return f"Player{number}"
+next_player_id = 1
 
 
 # ============================================================
-# Відправити початковий список гравців
+# Отримати ID
 # ============================================================
 
-async def send_initial_players(websocket, player_name):
+def get_player_id():
 
-    data = {
-        "type": "players",
-        "players": {}
-    }
+    global next_player_id
 
-    for name, player in players.items():
+    player_id = next_player_id
 
-        data["players"][name] = {
-            "x": player["x"],
-            "y": player["y"]
-        }
+    next_player_id += 1
 
-    try:
-
-        await websocket.send_text(
-            json.dumps(
-                data,
-                separators=(",", ":")
-            )
-        )
-
-    except Exception as e:
-
-        print(f"Initial players send error: {e}")
+    return player_id
 
 
 # ============================================================
-# Відправити нову позицію всім ІНШИМ гравцям
+# Відправити позицію іншому гравцю
 # ============================================================
 
-async def broadcast_position(
-    sender_name,
-    x,
-    y
-):
+async def broadcast_position(sender_id, x, y):
 
     message = json.dumps(
         {
-            "type": "position",
-            "name": sender_name,
+            "t": "p",
+            "i": sender_id,
             "x": x,
             "y": y
         },
@@ -84,82 +50,56 @@ async def broadcast_position(
 
     disconnected = []
 
-    for name, player in list(players.items()):
+    for player_id, player in list(players.items()):
 
-        # ================================================
-        # НЕ відправляємо самому собі
-        # ================================================
-
-        if name == sender_name:
+        # Не відправляємо самому собі
+        if player_id == sender_id:
             continue
 
         try:
 
-            await player["websocket"].send_text(
-                message
-            )
+            await player["websocket"].send_text(message)
 
-        except Exception as e:
+        except Exception:
 
-            print(
-                f"{name} send error:",
-                e
-            )
-
-            disconnected.append(name)
+            disconnected.append(player_id)
 
 
-    # ================================================
-    # Видаляємо відключених
-    # ================================================
+    for player_id in disconnected:
 
-    for name in disconnected:
-
-        if name in players:
-
-            del players[name]
-
-            print(
-                f"{name} removed after send error"
-            )
+        players.pop(player_id, None)
 
 
 # ============================================================
-# Повідомити інших, що гравець вийшов
+# Повідомити інших про вихід
 # ============================================================
 
-async def broadcast_player_left(
-    player_name
-):
+async def broadcast_player_left(player_id):
 
     message = json.dumps(
         {
-            "type": "player_left",
-            "name": player_name
+            "t": "l",
+            "i": player_id
         },
         separators=(",", ":")
     )
 
     disconnected = []
 
-    for name, player in list(players.items()):
+    for other_id, player in list(players.items()):
 
         try:
 
-            await player["websocket"].send_text(
-                message
-            )
+            await player["websocket"].send_text(message)
 
         except Exception:
 
-            disconnected.append(name)
+            disconnected.append(other_id)
 
 
-    for name in disconnected:
+    for other_id in disconnected:
 
-        if name in players:
-
-            del players[name]
+        players.pop(other_id, None)
 
 
 # ============================================================
@@ -167,78 +107,151 @@ async def broadcast_player_left(
 # ============================================================
 
 @app.websocket("/ws")
-async def websocket_endpoint(
-    websocket: WebSocket
-):
+async def websocket_endpoint(websocket: WebSocket):
 
     await websocket.accept()
 
-    # ========================================================
-    # Отримуємо ім'я
-    # ========================================================
-
-    player_name = get_player_name()
+    player_id = get_player_id()
 
 
     # ========================================================
-    # Створюємо гравця
+    # Чекаємо реєстрацію
     # ========================================================
-
-    players[player_name] = {
-
-        "websocket": websocket,
-
-        "x": 640,
-
-        "y": 360
-    }
-
-
-    print(
-        f"{player_name} connected"
-    )
-
-
-    # ========================================================
-    # Повідомляємо його ім'я
-    # ========================================================
-
-    await websocket.send_text(
-
-        json.dumps(
-            {
-                "type": "welcome",
-                "name": player_name
-            },
-            separators=(",", ":")
-        )
-    )
-
-
-    # ========================================================
-    # Відправляємо новому гравцю
-    # поточний список інших гравців
-    # ========================================================
-
-    await send_initial_players(
-        websocket,
-        player_name
-    )
-
-
-    # ========================================================
-    # Повідомляємо старих гравців,
-    # що з'явився новий
-    # ========================================================
-
-    await broadcast_position(
-        player_name,
-        640,
-        360
-    )
-
 
     try:
+
+        message = await websocket.receive_text()
+
+        data = json.loads(message)
+
+        if data.get("t") != "r":
+
+            await websocket.close()
+
+            return
+
+        nickname = str(
+            data.get("n", "Player")
+        )[:10]
+
+
+        # ====================================================
+        # Створюємо гравця
+        # ====================================================
+
+        players[player_id] = {
+
+            "websocket": websocket,
+
+            "nickname": nickname,
+
+            "x": 640,
+
+            "y": 360
+        }
+
+
+        print(
+            f"Player {player_id} connected as {nickname}"
+        )
+
+
+        # ====================================================
+        # Відправляємо ID гравцю
+        # ====================================================
+
+        await websocket.send_text(
+
+            json.dumps(
+                {
+                    "t": "w",
+                    "i": player_id
+                },
+                separators=(",", ":")
+            )
+        )
+
+
+        # ====================================================
+        # Передаємо новому гравцю існуючих гравців
+        #
+        # Тут нік потрібен тільки ОДИН раз.
+        # ====================================================
+
+        existing_players = []
+
+        for other_id, player in players.items():
+
+            if other_id == player_id:
+                continue
+
+            existing_players.append(
+                {
+                    "i": other_id,
+                    "n": player["nickname"],
+                    "x": player["x"],
+                    "y": player["y"]
+                }
+            )
+
+
+        await websocket.send_text(
+
+            json.dumps(
+                {
+                    "t": "s",
+                    "p": existing_players
+                },
+                separators=(",", ":")
+            )
+        )
+
+
+        # ====================================================
+        # Повідомляємо старих гравців про нового
+        # ====================================================
+
+        new_player_message = json.dumps(
+
+            {
+                "t": "j",
+                "i": player_id,
+                "n": nickname,
+                "x": 640,
+                "y": 360
+            },
+
+            separators=(",", ":")
+        )
+
+
+        disconnected = []
+
+
+        for other_id, player in list(players.items()):
+
+            if other_id == player_id:
+                continue
+
+            try:
+
+                await player["websocket"].send_text(
+                    new_player_message
+                )
+
+            except Exception:
+
+                disconnected.append(other_id)
+
+
+        for other_id in disconnected:
+
+            players.pop(other_id, None)
+
+
+        # ====================================================
+        # Основний цикл
+        # ====================================================
 
         while True:
 
@@ -251,52 +264,22 @@ async def websocket_endpoint(
             # Позиція
             # =================================================
 
-            if data.get("type") == "position":
+            if data.get("t") == "p":
 
-                # ---------------------------------------------
-                # Отримуємо цілі координати
-                # ---------------------------------------------
-
-                x = int(
-                    round(
-                        float(
-                            data.get("x", 0)
-                        )
-                    )
-                )
-
-                y = int(
-                    round(
-                        float(
-                            data.get("y", 0)
-                        )
-                    )
-                )
+                x = int(data.get("x", 0))
+                y = int(data.get("y", 0))
 
 
-                # ---------------------------------------------
-                # Перевіряємо, чи гравець ще існує
-                # ---------------------------------------------
-
-                if player_name not in players:
-
+                if player_id not in players:
                     break
 
 
-                # ---------------------------------------------
-                # Оновлюємо позицію на сервері
-                # ---------------------------------------------
+                players[player_id]["x"] = x
+                players[player_id]["y"] = y
 
-                players[player_name]["x"] = x
-                players[player_name]["y"] = y
-
-
-                # ---------------------------------------------
-                # Відправляємо ТІЛЬКИ іншим
-                # ---------------------------------------------
 
                 await broadcast_position(
-                    player_name,
+                    player_id,
                     x,
                     y
                 )
@@ -305,41 +288,31 @@ async def websocket_endpoint(
     except WebSocketDisconnect:
 
         print(
-            f"{player_name} disconnected"
+            f"Player {player_id} disconnected"
         )
 
 
     except Exception as e:
 
         print(
-            f"{player_name} error:",
+            f"Player {player_id} error:",
             e
         )
 
 
     finally:
 
-        # ====================================================
-        # Видаляємо гравця
-        # ====================================================
+        if player_id in players:
 
-        if player_name in players:
+            del players[player_id]
 
-            del players[player_name]
+            await broadcast_player_left(
+                player_id
+            )
 
-
-        # ====================================================
-        # Повідомляємо інших
-        # ====================================================
-
-        await broadcast_player_left(
-            player_name
-        )
-
-
-        print(
-            f"{player_name} removed"
-        )
+            print(
+                f"Player {player_id} removed"
+            )
 
 
 # ============================================================
