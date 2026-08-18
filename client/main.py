@@ -93,6 +93,7 @@ reconnecting = False
 # ============================================================
 
 running = True
+reconnect_thread = None
 
 
 # ============================================================
@@ -458,7 +459,7 @@ def reconnect_loop():
 def send_position():
 
     global ws
-
+    global connected
     if not connected:
         return
 
@@ -516,20 +517,6 @@ last_sent_y = None
 
 
 # ============================================================
-# Reconnect thread
-# ============================================================
-
-reconnect_thread = threading.Thread(
-
-    target=reconnect_loop,
-
-    daemon=True
-)
-
-reconnect_thread.start()
-
-
-# ============================================================
 # Головний цикл
 # ============================================================
 
@@ -570,12 +557,14 @@ while running:
 
                         registration_done = True
 
-
-                        # ====================================
-                        # ПІДКЛЮЧЕННЯ ТІЛЬКИ ТЕПЕР
-                        # ====================================
-
                         connect_to_server()
+
+                        reconnect_thread = threading.Thread(
+                            target=reconnect_loop,
+                            daemon=True
+                        )
+
+                        reconnect_thread.start()
 
 
                 # --------------------------------------------
