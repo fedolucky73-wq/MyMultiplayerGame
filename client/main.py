@@ -57,8 +57,6 @@ nickname = ""
 
 registration_done = False
 
-input_active = True
-
 
 # ============================================================
 # Мій гравець
@@ -86,7 +84,15 @@ ws = None
 connected = False
 
 reconnect_lock = threading.Lock()
+
 reconnecting = False
+
+
+# ============================================================
+# Завершення
+# ============================================================
+
+running = True
 
 
 # ============================================================
@@ -95,30 +101,13 @@ reconnecting = False
 
 def nickname_color(name):
 
-    # SHA-256 дає однаковий результат
-    # на всіх комп'ютерах
-
     digest = hashlib.sha256(
         name.encode("utf-8")
     ).digest()
 
-
-    # Беремо перші 3 байти
-
-    r = digest[0]
-    g = digest[1]
-    b = digest[2]
-
-
-    # Не дозволяємо отримати
-    # занадто темний колір
-
-    minimum = 80
-
-    r = max(r, minimum)
-    g = max(g, minimum)
-    b = max(b, minimum)
-
+    r = max(digest[0], 80)
+    g = max(digest[1], 80)
+    b = max(digest[2], 80)
 
     return (r, g, b)
 
@@ -127,7 +116,7 @@ def nickname_color(name):
 # Отримання повідомлень
 # ============================================================
 
-def receive_messages():
+def receive_messages(socket_connection):
 
     global my_id
     global connected
@@ -137,11 +126,10 @@ def receive_messages():
 
         while True:
 
-            message = ws.recv()
+            message = socket_connection.recv()
 
             if not message:
                 break
-
 
             data = json.loads(message)
 
@@ -163,16 +151,24 @@ def receive_messages():
 
 
             # =================================================
-            # Існуючі гравці
+            # Список існуючих гравців
             # =================================================
 
             elif message_type == "s":
 
-                for player in data["p"]:
+                # Повністю оновлюємо список
+                # після підключення / reconnect
+
+                new_players = {}
+
+                for player in data.get("p", []):
 
                     player_id = player["i"]
 
-                    other_players[player_id] = {
+                    if player_id == my_id:
+                        continue
+
+                    new_players[player_id] = {
 
                         "name": player["n"],
 
@@ -186,6 +182,9 @@ def receive_messages():
                     }
 
 
+                other_players = new_players
+
+
             # =================================================
             # Новий гравець
             # =================================================
@@ -193,7 +192,6 @@ def receive_messages():
             elif message_type == "j":
 
                 player_id = data["i"]
-
 
                 if player_id == my_id:
                     continue
@@ -221,25 +219,24 @@ def receive_messages():
 
                 player_id = data["i"]
 
+
                 # Не приймаємо власні координати
+
                 if player_id == my_id:
                     continue
 
-                x = data["x"]
-                y = data["y"]
 
-                # --------------------------------------------------------
-                # Якщо такого гравця немає — НЕ створюємо його.
-                #
-                # Він повинен спочатку прийти через "j" або "s".
-                # --------------------------------------------------------
+                # Якщо гравець ще не був
+                # зареєстрований через j/s —
+                # НЕ створюємо його
 
                 if player_id not in other_players:
                     continue
 
-                # Нова ціль для плавного руху
-                other_players[player_id]["target_x"] = x
-                other_players[player_id]["target_y"] = y
+
+                other_players[player_id]["target_x"] = data["x"]
+
+                other_players[player_id]["target_y"] = data["y"]
 
 
             # =================================================
@@ -263,13 +260,29 @@ def receive_messages():
             e
         )
 
-        connected = False
 
-        # Закриваємо старе з'єднання
-        try:
-            ws.close()
-        except:
-            pass
+    finally:
+
+        # ================================================
+        # Дуже важливо:
+        #
+        # перевіряємо саме ЦЕ з'єднання.
+        #
+        # Старий socket не повинен закрити
+        # новий socket після reconnect.
+        # ================================================
+
+        global ws
+
+        if ws is socket_connection:
+
+            connected = False
+
+            try:
+                socket_connection.close()
+            except:
+                pass
+
 
 # ============================================================
 # Підключення
@@ -280,10 +293,18 @@ def connect_to_server():
     global ws
     global connected
     global my_id
+    global other_players
 
     try:
 
-        print("Connecting to server...")
+        print(
+            "Connecting to server..."
+        )
+
+
+        # ====================================================
+        # Створюємо НОВИЙ socket
+        # ====================================================
 
         new_ws = websocket.create_connection(
             SERVER_URL,
@@ -292,18 +313,36 @@ def connect_to_server():
 
         new_ws.settimeout(None)
 
+
+        # ====================================================
+        # Робимо його поточним
+        # ====================================================
+
         ws = new_ws
 
         connected = True
 
-        print("Connected!")
+        my_id = None
 
 
-        # -----------------------------------------------
+        # ====================================================
+        # Очищаємо старих гравців
+        # ====================================================
+
+        other_players.clear()
+
+
+        print(
+            "Connected!"
+        )
+
+
+        # ====================================================
         # Реєстрація
-        # -----------------------------------------------
+        # ====================================================
 
-        ws.send(
+        new_ws.send(
+
             json.dumps(
                 {
                     "t": "r",
@@ -320,12 +359,16 @@ def connect_to_server():
         )
 
 
-        # -----------------------------------------------
+        # ====================================================
         # Потік отримання
-        # -----------------------------------------------
+        # ====================================================
 
         thread = threading.Thread(
+
             target=receive_messages,
+
+            args=(new_ws,),
+
             daemon=True
         )
 
@@ -347,17 +390,31 @@ def connect_to_server():
         return False
 
 
+# ============================================================
+# Reconnect
+# ============================================================
+
 def reconnect_loop():
 
     global reconnecting
 
     while running:
 
+        if not registration_done:
+
+            pygame.time.wait(500)
+
+            continue
+
+
         if not connected:
 
             with reconnect_lock:
 
                 if reconnecting:
+
+                    pygame.time.wait(100)
+
                     continue
 
                 reconnecting = True
@@ -391,44 +448,7 @@ def reconnect_loop():
 
         else:
 
-            pygame.time.wait(1000)
-
-# ============================================================
-# Реєстрація на сервері
-# ============================================================
-
-def register():
-
-    if not connected:
-        return
-
-
-    try:
-
-        ws.send(
-
-            json.dumps(
-                {
-                    "t": "r",
-                    "n": nickname
-                },
-                separators=(",", ":")
-            )
-        )
-
-
-        print(
-            "Registered as:",
-            nickname
-        )
-
-
-    except Exception as e:
-
-        print(
-            "Registration error:",
-            e
-        )
+            pygame.time.wait(500)
 
 
 # ============================================================
@@ -436,6 +456,8 @@ def register():
 # ============================================================
 
 def send_position():
+
+    global ws
 
     if not connected:
         return
@@ -452,17 +474,23 @@ def send_position():
         )
 
 
-        ws.send(
+        # ====================================================
+        # Мінімальне повідомлення
+        # ====================================================
 
-            json.dumps(
-                {
-                    "t": "p",
-                    "x": x,
-                    "y": y
-                },
-                separators=(",", ":")
-            )
+        message = json.dumps(
+
+            {
+                "t": "p",
+                "x": x,
+                "y": y
+            },
+
+            separators=(",", ":")
         )
+
+
+        ws.send(message)
 
 
     except Exception as e:
@@ -472,26 +500,11 @@ def send_position():
             e
         )
 
-
-# ============================================================
-# Підключення
-# ============================================================
-
-running = True
-
-connect_to_server()
-
-
-reconnect_thread = threading.Thread(
-    target=reconnect_loop,
-    daemon=True
-)
-
-reconnect_thread.start()
+        connected = False
 
 
 # ============================================================
-# Таймер
+# Головний цикл
 # ============================================================
 
 send_timer = 0.0
@@ -503,11 +516,22 @@ last_sent_y = None
 
 
 # ============================================================
-# Головний цикл
+# Reconnect thread
 # ============================================================
 
-running = True
+reconnect_thread = threading.Thread(
 
+    target=reconnect_loop,
+
+    daemon=True
+)
+
+reconnect_thread.start()
+
+
+# ============================================================
+# Головний цикл
+# ============================================================
 
 while running:
 
@@ -533,21 +557,39 @@ while running:
 
             if event.type == pygame.KEYDOWN:
 
+                # --------------------------------------------
+                # ENTER
+                # --------------------------------------------
+
                 if event.key == pygame.K_RETURN:
 
                     nickname = nickname.strip()
+
 
                     if nickname:
 
                         registration_done = True
 
-                        register()
 
+                        # ====================================
+                        # ПІДКЛЮЧЕННЯ ТІЛЬКИ ТЕПЕР
+                        # ====================================
+
+                        connect_to_server()
+
+
+                # --------------------------------------------
+                # BACKSPACE
+                # --------------------------------------------
 
                 elif event.key == pygame.K_BACKSPACE:
 
                     nickname = nickname[:-1]
 
+
+                # --------------------------------------------
+                # Символ
+                # --------------------------------------------
 
                 else:
 
@@ -570,48 +612,69 @@ while running:
 
 
         title = input_font.render(
+
             "Enter your nickname:",
+
             True,
+
             (255, 255, 255)
         )
 
 
         screen.blit(
+
             title,
+
             (
-                WIDTH // 2 - title.get_width() // 2,
+                WIDTH // 2 -
+                title.get_width() // 2,
+
                 250
             )
         )
 
 
         nickname_text = input_font.render(
+
             nickname,
+
             True,
+
             (255, 255, 255)
         )
 
 
         screen.blit(
+
             nickname_text,
+
             (
-                WIDTH // 2 - nickname_text.get_width() // 2,
+                WIDTH // 2 -
+                nickname_text.get_width() // 2,
+
                 330
             )
         )
 
 
         info = font.render(
+
             f"{len(nickname)}/10   Press ENTER",
+
             True,
+
             (220, 220, 220)
         )
 
 
         screen.blit(
+
             info,
+
             (
-                WIDTH // 2 - info.get_width() // 2,
+                WIDTH // 2 -
+                info.get_width() // 2,
+
                 400
             )
         )
@@ -685,7 +748,9 @@ while running:
 
 
     player_x = max(
+
         half,
+
         min(
             WIDTH - half,
             player_x
@@ -694,7 +759,9 @@ while running:
 
 
     player_y = max(
+
         half,
+
         min(
             HEIGHT - half,
             player_y
@@ -703,10 +770,11 @@ while running:
 
 
     # ========================================================
-    # Відправлення
+    # Відправлення позиції
     # ========================================================
 
     is_moving = (
+
         dx != 0 or
         dy != 0
     )
@@ -732,14 +800,19 @@ while running:
 
 
             if (
+
                 current_x != last_sent_x
+
                 or
+
                 current_y != last_sent_y
+
             ):
 
                 send_position()
 
                 last_sent_x = current_x
+
                 last_sent_y = current_y
 
 
@@ -755,14 +828,19 @@ while running:
 
 
         if (
+
             current_x != last_sent_x
+
             or
+
             current_y != last_sent_y
+
         ):
 
             send_position()
 
             last_sent_x = current_x
+
             last_sent_y = current_y
 
 
@@ -782,14 +860,18 @@ while running:
     for player in other_players.values():
 
         player["x"] += (
+
             player["target_x"] -
             player["x"]
+
         ) * interpolation_speed * dt
 
 
         player["y"] += (
+
             player["target_y"] -
             player["y"]
+
         ) * interpolation_speed * dt
 
 
@@ -933,9 +1015,13 @@ while running:
     # ========================================================
 
     status = (
+
         "ONLINE"
+
         if connected
+
         else
+
         "OFFLINE"
     )
 
@@ -964,6 +1050,9 @@ while running:
 # ============================================================
 # Завершення
 # ============================================================
+
+running = False
+
 
 if ws:
 
