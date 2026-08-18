@@ -3,7 +3,6 @@ import sys
 import math
 import threading
 import json
-import time
 import websocket
 
 
@@ -18,10 +17,6 @@ FPS = 60
 
 PLAYER_SIZE = 50
 PLAYER_SPEED = 300
-
-# ------------------------------------------------------------
-# ПОКИ ЩО ЛОКАЛЬНИЙ СЕРВЕР
-# ------------------------------------------------------------
 
 SERVER_URL = "wss://mymultiplayergame.onrender.com/ws"
 
@@ -62,12 +57,11 @@ other_players = {}
 # ============================================================
 
 ws = None
-
 connected = False
 
 
 # ============================================================
-# WebSocket отримання повідомлень
+# Отримання повідомлень
 # ============================================================
 
 def receive_messages():
@@ -87,21 +81,25 @@ def receive_messages():
 
             data = json.loads(message)
 
-            # -----------------------------------------------
-            # Наше ім'я
-            # -----------------------------------------------
+            message_type = data.get("type")
 
-            if data.get("type") == "welcome":
+
+            # ------------------------------------------------
+            # Наше ім'я
+            # ------------------------------------------------
+
+            if message_type == "welcome":
 
                 my_name = data["name"]
 
                 print("You are:", my_name)
 
-            # -----------------------------------------------
-            # Позиції гравців
-            # -----------------------------------------------
 
-            elif data.get("type") == "players":
+            # ------------------------------------------------
+            # Початковий список гравців
+            # ------------------------------------------------
+
+            elif message_type == "players":
 
                 server_players = data["players"]
 
@@ -110,7 +108,6 @@ def receive_messages():
                     if name == my_name:
                         continue
 
-                    # Якщо нового гравця ще немає
                     if name not in other_players:
 
                         other_players[name] = {
@@ -122,16 +119,53 @@ def receive_messages():
 
                     else:
 
-                        # Нова ціль для плавного руху
                         other_players[name]["target_x"] = position["x"]
                         other_players[name]["target_y"] = position["y"]
 
-                # Видаляємо тих, хто вийшов
-                for name in list(other_players.keys()):
 
-                    if name not in server_players:
+            # ------------------------------------------------
+            # Зміна позиції ОДНОГО гравця
+            # ------------------------------------------------
 
-                        del other_players[name]
+            elif message_type == "position":
+
+                name = data["name"]
+
+                # Ніколи не додаємо самого себе
+                if name == my_name:
+                    continue
+
+                x = data["x"]
+                y = data["y"]
+
+
+                if name not in other_players:
+
+                    other_players[name] = {
+                        "x": x,
+                        "y": y,
+                        "target_x": x,
+                        "target_y": y
+                    }
+
+                else:
+
+                    other_players[name]["target_x"] = x
+                    other_players[name]["target_y"] = y
+
+
+            # ------------------------------------------------
+            # Гравець вийшов
+            # ------------------------------------------------
+
+            elif message_type == "player_left":
+
+                name = data["name"]
+
+                if name in other_players:
+
+                    del other_players[name]
+
 
     except Exception as e:
 
@@ -188,13 +222,21 @@ def send_position():
 
     try:
 
-        ws.send(
-            json.dumps({
+        # Передаємо тільки цілі координати
+        x = int(round(player_x))
+        y = int(round(player_y))
+
+        # Компактний JSON без зайвих пробілів
+        message = json.dumps(
+            {
                 "type": "position",
-                "x": player_x,
-                "y": player_y
-            })
+                "x": x,
+                "y": y
+            },
+            separators=(",", ":")
         )
+
+        ws.send(message)
 
     except Exception as e:
 
@@ -202,7 +244,7 @@ def send_position():
 
 
 # ============================================================
-# Підключаємося
+# Підключення
 # ============================================================
 
 connect_to_server()
@@ -212,7 +254,13 @@ connect_to_server()
 # Таймер відправки
 # ============================================================
 
-send_timer = 0
+send_timer = 0.0
+
+was_moving = False
+
+# Остання позиція, яку реально відправили
+last_sent_x = None
+last_sent_y = None
 
 
 # ============================================================
@@ -225,6 +273,7 @@ while running:
 
     dt = clock.tick(FPS) / 1000.0
 
+
     # ========================================================
     # Події
     # ========================================================
@@ -234,6 +283,7 @@ while running:
         if event.type == pygame.QUIT:
 
             running = False
+
 
     # ========================================================
     # Керування
@@ -256,6 +306,7 @@ while running:
     if keys[pygame.K_s] or keys[pygame.K_DOWN]:
         dy += 1
 
+
     # ========================================================
     # Нормалізація
     # ========================================================
@@ -267,12 +318,14 @@ while running:
         dx /= length
         dy /= length
 
+
     # ========================================================
     # Рух
     # ========================================================
 
     player_x += dx * PLAYER_SPEED * dt
     player_y += dy * PLAYER_SPEED * dt
+
 
     # ========================================================
     # Межі
@@ -290,17 +343,66 @@ while running:
         min(HEIGHT - half, player_y)
     )
 
+
     # ========================================================
-    # Відправляємо позицію кожні 0.1 секунди
+    # Мережева логіка
     # ========================================================
 
-    send_timer += dt
+    is_moving = dx != 0 or dy != 0
 
-    if send_timer >= 0.1:
 
-        send_timer = 0
+    if is_moving:
 
-        send_position()
+        send_timer += dt
+
+        if send_timer >= 0.1:
+
+            send_timer = 0.0
+
+            current_x = int(round(player_x))
+            current_y = int(round(player_y))
+
+
+            # Відправляємо тільки якщо координати
+            # реально змінилися
+            if (
+                current_x != last_sent_x
+                or
+                current_y != last_sent_y
+            ):
+
+                send_position()
+
+                last_sent_x = current_x
+                last_sent_y = current_y
+
+
+    elif was_moving:
+
+        # Гравець щойно зупинився.
+        # Відправляємо фінальну позицію.
+
+        current_x = int(round(player_x))
+        current_y = int(round(player_y))
+
+
+        if (
+            current_x != last_sent_x
+            or
+            current_y != last_sent_y
+        ):
+
+            send_position()
+
+            last_sent_x = current_x
+            last_sent_y = current_y
+
+
+        send_timer = 0.0
+
+
+    was_moving = is_moving
+
 
     # ========================================================
     # Плавний рух інших гравців
@@ -318,11 +420,13 @@ while running:
             player["target_y"] - player["y"]
         ) * interpolation_speed * dt
 
+
     # ========================================================
     # Малювання
     # ========================================================
 
     screen.fill((30, 30, 30))
+
 
     # --------------------------------------------------------
     # Інші гравці
@@ -355,6 +459,7 @@ while running:
             )
         )
 
+
     # --------------------------------------------------------
     # Наш гравець
     # --------------------------------------------------------
@@ -384,6 +489,7 @@ while running:
         )
     )
 
+
     # --------------------------------------------------------
     # Статус
     # --------------------------------------------------------
@@ -401,6 +507,7 @@ while running:
         (10, 10)
     )
 
+
     pygame.display.flip()
 
 
@@ -414,6 +521,7 @@ if ws:
         ws.close()
     except:
         pass
+
 
 pygame.quit()
 sys.exit()
