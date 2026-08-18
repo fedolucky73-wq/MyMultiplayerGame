@@ -23,7 +23,7 @@ PLAYER_SPEED = 300
 # ПОКИ ЩО ЛОКАЛЬНИЙ СЕРВЕР
 # ------------------------------------------------------------
 
-SERVER_URL = "wss://https://mymultiplayergame.onrender.com/ws"
+SERVER_URL = "wss://mymultiplayergame.onrender.com/ws"
 
 
 # ============================================================
