@@ -1,5 +1,6 @@
 import json
 import os
+import asyncio
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 import uvicorn
@@ -14,26 +15,23 @@ app = FastAPI()
 
 players = {}
 
-next_player_id = 1
-
 
 # ============================================================
-# Отримати ID
+# Отримати найменший вільний ID
 # ============================================================
 
 def get_player_id():
 
-    global next_player_id
+    player_id = 1
 
-    player_id = next_player_id
-
-    next_player_id += 1
+    while player_id in players:
+        player_id += 1
 
     return player_id
 
 
 # ============================================================
-# Відправити позицію іншому гравцю
+# Відправити позицію іншим гравцям
 # ============================================================
 
 async def broadcast_position(sender_id, x, y):
@@ -65,9 +63,12 @@ async def broadcast_position(sender_id, x, y):
             disconnected.append(player_id)
 
 
+    # Прибираємо мертвих клієнтів
     for player_id in disconnected:
 
-        players.pop(player_id, None)
+        if player_id in players:
+
+            del players[player_id]
 
 
 # ============================================================
@@ -88,6 +89,9 @@ async def broadcast_player_left(player_id):
 
     for other_id, player in list(players.items()):
 
+        if other_id == player_id:
+            continue
+
         try:
 
             await player["websocket"].send_text(message)
@@ -99,7 +103,54 @@ async def broadcast_player_left(player_id):
 
     for other_id in disconnected:
 
-        players.pop(other_id, None)
+        if other_id in players:
+
+            del players[other_id]
+
+
+# ============================================================
+# Повідомити інших про нового гравця
+# ============================================================
+
+async def broadcast_player_joined(
+    player_id,
+    nickname,
+    x,
+    y
+):
+
+    message = json.dumps(
+        {
+            "t": "j",
+            "i": player_id,
+            "n": nickname,
+            "x": x,
+            "y": y
+        },
+        separators=(",", ":")
+    )
+
+    disconnected = []
+
+    for other_id, player in list(players.items()):
+
+        if other_id == player_id:
+            continue
+
+        try:
+
+            await player["websocket"].send_text(message)
+
+        except Exception:
+
+            disconnected.append(other_id)
+
+
+    for other_id in disconnected:
+
+        if other_id in players:
+
+            del players[other_id]
 
 
 # ============================================================
@@ -111,18 +162,19 @@ async def websocket_endpoint(websocket: WebSocket):
 
     await websocket.accept()
 
-    player_id = get_player_id()
+    player_id = None
 
-
-    # ========================================================
-    # Чекаємо реєстрацію
-    # ========================================================
 
     try:
+
+        # ====================================================
+        # Чекаємо реєстрацію
+        # ====================================================
 
         message = await websocket.receive_text()
 
         data = json.loads(message)
+
 
         if data.get("t") != "r":
 
@@ -130,9 +182,17 @@ async def websocket_endpoint(websocket: WebSocket):
 
             return
 
+
         nickname = str(
             data.get("n", "Player")
         )[:10]
+
+
+        # ====================================================
+        # Отримуємо найменший вільний ID
+        # ====================================================
+
+        player_id = get_player_id()
 
 
         # ====================================================
@@ -157,7 +217,7 @@ async def websocket_endpoint(websocket: WebSocket):
 
 
         # ====================================================
-        # Відправляємо ID гравцю
+        # Відправляємо ID
         # ====================================================
 
         await websocket.send_text(
@@ -173,12 +233,12 @@ async def websocket_endpoint(websocket: WebSocket):
 
 
         # ====================================================
-        # Передаємо новому гравцю існуючих гравців
-        #
-        # Тут нік потрібен тільки ОДИН раз.
+        # Відправляємо новому гравцю
+        # існуючих гравців
         # ====================================================
 
         existing_players = []
+
 
         for other_id, player in players.items():
 
@@ -208,45 +268,15 @@ async def websocket_endpoint(websocket: WebSocket):
 
 
         # ====================================================
-        # Повідомляємо старих гравців про нового
+        # Повідомляємо інших про нового
         # ====================================================
 
-        new_player_message = json.dumps(
-
-            {
-                "t": "j",
-                "i": player_id,
-                "n": nickname,
-                "x": 640,
-                "y": 360
-            },
-
-            separators=(",", ":")
+        await broadcast_player_joined(
+            player_id,
+            nickname,
+            640,
+            360
         )
-
-
-        disconnected = []
-
-
-        for other_id, player in list(players.items()):
-
-            if other_id == player_id:
-                continue
-
-            try:
-
-                await player["websocket"].send_text(
-                    new_player_message
-                )
-
-            except Exception:
-
-                disconnected.append(other_id)
-
-
-        for other_id in disconnected:
-
-            players.pop(other_id, None)
 
 
         # ====================================================
@@ -266,9 +296,16 @@ async def websocket_endpoint(websocket: WebSocket):
 
             if data.get("t") == "p":
 
-                x = int(data.get("x", 0))
-                y = int(data.get("y", 0))
+                x = int(
+                    data.get("x", 0)
+                )
 
+                y = int(
+                    data.get("y", 0)
+                )
+
+
+                # Перевіряємо, що гравець ще існує
 
                 if player_id not in players:
                     break
@@ -302,17 +339,28 @@ async def websocket_endpoint(websocket: WebSocket):
 
     finally:
 
-        if player_id in players:
+        # ====================================================
+        # Видаляємо гравця
+        # ====================================================
 
-            del players[player_id]
+        if player_id is not None:
 
-            await broadcast_player_left(
-                player_id
-            )
+            if player_id in players:
 
-            print(
-                f"Player {player_id} removed"
-            )
+                del players[player_id]
+
+                print(
+                    f"Player {player_id} removed"
+                )
+
+
+                # ============================================
+                # Миттєво повідомляємо інших
+                # ============================================
+
+                await broadcast_player_left(
+                    player_id
+                )
 
 
 # ============================================================
@@ -340,6 +388,7 @@ if __name__ == "__main__":
             10000
         )
     )
+
 
     uvicorn.run(
         app,

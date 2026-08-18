@@ -85,6 +85,9 @@ ws = None
 
 connected = False
 
+reconnect_lock = threading.Lock()
+reconnecting = False
+
 
 # ============================================================
 # Колір з ніку
@@ -278,6 +281,11 @@ def receive_messages():
 
         connected = False
 
+        # Закриваємо старе з'єднання
+        try:
+            ws.close()
+        except:
+            pass
 
 # ============================================================
 # Підключення
@@ -287,25 +295,50 @@ def connect_to_server():
 
     global ws
     global connected
+    global my_id
 
     try:
 
-        print(
-            "Connecting to server..."
+        print("Connecting to server...")
+
+        new_ws = websocket.create_connection(
+            SERVER_URL,
+            timeout=10
         )
 
-        ws = websocket.create_connection(
-            SERVER_URL
-        )
+        new_ws.settimeout(None)
 
-        ws.settimeout(None)
+        ws = new_ws
 
         connected = True
 
-        print(
-            "Connected!"
+        print("Connected!")
+
+
+        # -----------------------------------------------
+        # Реєстрація
+        # -----------------------------------------------
+
+        ws.send(
+            json.dumps(
+                {
+                    "t": "r",
+                    "n": nickname
+                },
+                separators=(",", ":")
+            )
         )
 
+
+        print(
+            "Registered as:",
+            nickname
+        )
+
+
+        # -----------------------------------------------
+        # Потік отримання
+        # -----------------------------------------------
 
         thread = threading.Thread(
             target=receive_messages,
@@ -313,6 +346,9 @@ def connect_to_server():
         )
 
         thread.start()
+
+
+        return True
 
 
     except Exception as e:
@@ -324,6 +360,54 @@ def connect_to_server():
 
         connected = False
 
+        return False
+
+
+def reconnect_loop():
+
+    global reconnecting
+
+    while running:
+
+        if not connected:
+
+            with reconnect_lock:
+
+                if reconnecting:
+                    continue
+
+                reconnecting = True
+
+
+            print(
+                "Connection lost. Reconnecting..."
+            )
+
+
+            success = connect_to_server()
+
+
+            if success:
+
+                print(
+                    "Reconnected!"
+                )
+
+            else:
+
+                print(
+                    "Retrying in 3 seconds..."
+                )
+
+                pygame.time.wait(3000)
+
+
+            reconnecting = False
+
+
+        else:
+
+            pygame.time.wait(1000)
 
 # ============================================================
 # Реєстрація на сервері
@@ -409,7 +493,17 @@ def send_position():
 # Підключення
 # ============================================================
 
+running = True
+
 connect_to_server()
+
+
+reconnect_thread = threading.Thread(
+    target=reconnect_loop,
+    daemon=True
+)
+
+reconnect_thread.start()
 
 
 # ============================================================
