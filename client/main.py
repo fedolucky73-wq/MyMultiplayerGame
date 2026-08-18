@@ -221,41 +221,25 @@ def receive_messages():
 
                 player_id = data["i"]
 
-
-                # Самого себе ігноруємо
-
+                # Не приймаємо власні координати
                 if player_id == my_id:
                     continue
-
 
                 x = data["x"]
                 y = data["y"]
 
+                # --------------------------------------------------------
+                # Якщо такого гравця немає — НЕ створюємо його.
+                #
+                # Він повинен спочатку прийти через "j" або "s".
+                # --------------------------------------------------------
 
                 if player_id not in other_players:
+                    continue
 
-                    other_players[player_id] = {
-
-                        "name": "Player",
-
-                        "x": x,
-
-                        "y": y,
-
-                        "target_x": x,
-
-                        "target_y": y
-                    }
-
-                else:
-
-                    other_players[player_id][
-                        "target_x"
-                    ] = x
-
-                    other_players[player_id][
-                        "target_y"
-                    ] = y
+                # Нова ціль для плавного руху
+                other_players[player_id]["target_x"] = x
+                other_players[player_id]["target_y"] = y
 
 
             # =================================================
