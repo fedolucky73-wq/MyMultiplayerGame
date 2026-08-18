@@ -7,7 +7,7 @@ import uvicorn
 
 
 app = FastAPI()
-
+HEARTBEAT_INTERVAL = 5
 
 # ============================================================
 # Гравці
@@ -153,6 +153,39 @@ async def broadcast_player_joined(
             del players[other_id]
 
 
+async def heartbeat(player_id, websocket):
+
+    while True:
+
+        await asyncio.sleep(
+            HEARTBEAT_INTERVAL
+        )
+
+        if player_id not in players:
+            return
+
+        try:
+
+            await websocket.send_text(
+                '{"t":"h"}'
+            )
+
+        except Exception:
+
+            if player_id in players:
+
+                del players[player_id]
+
+                print(
+                    f"Player {player_id} heartbeat disconnected"
+                )
+
+                await broadcast_player_left(
+                    player_id
+                )
+
+            return
+
 # ============================================================
 # WebSocket
 # ============================================================
@@ -163,7 +196,7 @@ async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
 
     player_id = None
-
+    heartbeat_task = None
 
     try:
 
@@ -278,6 +311,13 @@ async def websocket_endpoint(websocket: WebSocket):
             360
         )
 
+        heartbeat_task = asyncio.create_task(
+            heartbeat(
+                player_id,
+                websocket
+            )
+        )
+
 
         # ====================================================
         # Основний цикл
@@ -338,6 +378,10 @@ async def websocket_endpoint(websocket: WebSocket):
 
 
     finally:
+
+        if heartbeat_task:
+
+            heartbeat_task.cancel()
 
         # ====================================================
         # Видаляємо гравця

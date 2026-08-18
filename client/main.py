@@ -136,6 +136,23 @@ def receive_messages(socket_connection):
 
             message_type = data.get("t")
 
+            # =================================================
+            # Heartbeat від сервера
+            # =================================================
+
+            if message_type == "h":
+
+                try:
+
+                    socket_connection.send(
+                        '{"t":"a"}'
+                    )
+
+                except:
+
+                    pass
+
+                continue
 
             # =================================================
             # Наш ID
