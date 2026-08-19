@@ -1,23 +1,344 @@
 import json
 import os
 import asyncio
+import hashlib
+import secrets
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+import psycopg2
 import uvicorn
 
 
 app = FastAPI()
+
 HEARTBEAT_INTERVAL = 5
 
+
 # ============================================================
-# Гравці
+# PostgreSQL
+# ============================================================
+
+DATABASE_URL = os.environ.get("DATABASE_URL")
+
+
+def get_db():
+
+    return psycopg2.connect(
+        DATABASE_URL
+    )
+
+
+# ============================================================
+# Створення таблиці
+# ============================================================
+
+def init_database():
+
+    connection = get_db()
+
+    cursor = connection.cursor()
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS players (
+
+            id SERIAL PRIMARY KEY,
+
+            nickname VARCHAR(15) UNIQUE NOT NULL,
+
+            password_hash TEXT NOT NULL,
+
+            money INTEGER NOT NULL DEFAULT 100,
+
+            x INTEGER NOT NULL DEFAULT 640,
+
+            y INTEGER NOT NULL DEFAULT 360
+
+        );
+    """)
+
+    connection.commit()
+
+    cursor.close()
+    connection.close()
+
+    print("Database initialized")
+
+
+# ============================================================
+# Пароль
+# ============================================================
+
+def hash_password(password):
+
+    salt = secrets.token_bytes(16)
+
+    password_hash = hashlib.pbkdf2_hmac(
+        "sha256",
+        password.encode("utf-8"),
+        salt,
+        100_000
+    )
+
+    return (
+        salt.hex()
+        + ":"
+        + password_hash.hex()
+    )
+
+
+def verify_password(password, stored_hash):
+
+    try:
+
+        salt_hex, hash_hex = stored_hash.split(":")
+
+        salt = bytes.fromhex(
+            salt_hex
+        )
+
+        password_hash = hashlib.pbkdf2_hmac(
+            "sha256",
+            password.encode("utf-8"),
+            salt,
+            100_000
+        )
+
+        return secrets.compare_digest(
+            password_hash.hex(),
+            hash_hex
+        )
+
+    except Exception:
+
+        return False
+
+
+# ============================================================
+# Створення акаунта
+# ============================================================
+
+def create_account(
+    nickname,
+    password
+):
+
+    connection = get_db()
+
+    cursor = connection.cursor()
+
+    try:
+
+        password_hash = hash_password(
+            password
+        )
+
+        cursor.execute(
+            """
+            INSERT INTO players
+            (
+                nickname,
+                password_hash,
+                money,
+                x,
+                y
+            )
+            VALUES
+            (
+                %s,
+                %s,
+                100,
+                640,
+                360
+            )
+            RETURNING id
+            """,
+            (
+                nickname,
+                password_hash
+            )
+        )
+
+        player_id = cursor.fetchone()[0]
+
+        connection.commit()
+
+        return {
+            "success": True,
+            "id": player_id,
+            "money": 100,
+            "x": 640,
+            "y": 360
+        }
+
+    except psycopg2.errors.UniqueViolation:
+
+        connection.rollback()
+
+        return {
+            "success": False,
+            "error": "nickname_taken"
+        }
+
+    except Exception as e:
+
+        connection.rollback()
+
+        print(
+            "Create account error:",
+            e
+        )
+
+        return {
+            "success": False,
+            "error": "database_error"
+        }
+
+    finally:
+
+        cursor.close()
+        connection.close()
+
+
+# ============================================================
+# Вхід
+# ============================================================
+
+def login_account(
+    nickname,
+    password
+):
+
+    connection = get_db()
+
+    cursor = connection.cursor()
+
+    try:
+
+        cursor.execute(
+            """
+            SELECT
+                id,
+                password_hash,
+                money,
+                x,
+                y
+            FROM players
+            WHERE nickname = %s
+            """,
+            (nickname,)
+        )
+
+        row = cursor.fetchone()
+
+        if row is None:
+
+            return {
+                "success": False,
+                "error": "invalid_login"
+            }
+
+        player_id = row[0]
+        stored_hash = row[1]
+        money = row[2]
+        x = row[3]
+        y = row[4]
+
+        if not verify_password(
+            password,
+            stored_hash
+        ):
+
+            return {
+                "success": False,
+                "error": "invalid_login"
+            }
+
+        return {
+            "success": True,
+            "id": player_id,
+            "money": money,
+            "x": x,
+            "y": y
+        }
+
+    except Exception as e:
+
+        print(
+            "Login error:",
+            e
+        )
+
+        return {
+            "success": False,
+            "error": "database_error"
+        }
+
+    finally:
+
+        cursor.close()
+        connection.close()
+
+
+# ============================================================
+# Збереження даних гравця
+# ============================================================
+
+def save_player(
+    player_id,
+    money,
+    x,
+    y
+):
+
+    connection = get_db()
+
+    cursor = connection.cursor()
+
+    try:
+
+        cursor.execute(
+            """
+            UPDATE players
+            SET
+                money = %s,
+                x = %s,
+                y = %s
+            WHERE id = %s
+            """,
+            (
+                money,
+                x,
+                y,
+                player_id
+            )
+        )
+
+        connection.commit()
+
+    except Exception as e:
+
+        connection.rollback()
+
+        print(
+            "Save player error:",
+            e
+        )
+
+    finally:
+
+        cursor.close()
+        connection.close()
+
+
+# ============================================================
+# Онлайн-гравці
 # ============================================================
 
 players = {}
 
 
 # ============================================================
-# Отримати найменший вільний ID
+# Отримати найменший вільний WebSocket ID
 # ============================================================
 
 def get_player_id():
@@ -25,16 +346,21 @@ def get_player_id():
     player_id = 1
 
     while player_id in players:
+
         player_id += 1
 
     return player_id
 
 
 # ============================================================
-# Відправити позицію іншим гравцям
+# Відправити позицію іншим
 # ============================================================
 
-async def broadcast_position(sender_id, x, y):
+async def broadcast_position(
+    sender_id,
+    x,
+    y
+):
 
     message = json.dumps(
         {
@@ -48,22 +374,25 @@ async def broadcast_position(sender_id, x, y):
 
     disconnected = []
 
-    for player_id, player in list(players.items()):
+    for player_id, player in list(
+        players.items()
+    ):
 
-        # Не відправляємо самому собі
         if player_id == sender_id:
             continue
 
         try:
 
-            await player["websocket"].send_text(message)
+            await player[
+                "websocket"
+            ].send_text(message)
 
         except Exception:
 
-            disconnected.append(player_id)
+            disconnected.append(
+                player_id
+            )
 
-
-    # Прибираємо мертвих клієнтів
     for player_id in disconnected:
 
         if player_id in players:
@@ -72,10 +401,12 @@ async def broadcast_position(sender_id, x, y):
 
 
 # ============================================================
-# Повідомити інших про вихід
+# Повідомити про вихід
 # ============================================================
 
-async def broadcast_player_left(player_id):
+async def broadcast_player_left(
+    player_id
+):
 
     message = json.dumps(
         {
@@ -87,19 +418,24 @@ async def broadcast_player_left(player_id):
 
     disconnected = []
 
-    for other_id, player in list(players.items()):
+    for other_id, player in list(
+        players.items()
+    ):
 
         if other_id == player_id:
             continue
 
         try:
 
-            await player["websocket"].send_text(message)
+            await player[
+                "websocket"
+            ].send_text(message)
 
         except Exception:
 
-            disconnected.append(other_id)
-
+            disconnected.append(
+                other_id
+            )
 
     for other_id in disconnected:
 
@@ -109,7 +445,7 @@ async def broadcast_player_left(player_id):
 
 
 # ============================================================
-# Повідомити інших про нового гравця
+# Повідомити про нового гравця
 # ============================================================
 
 async def broadcast_player_joined(
@@ -132,19 +468,24 @@ async def broadcast_player_joined(
 
     disconnected = []
 
-    for other_id, player in list(players.items()):
+    for other_id, player in list(
+        players.items()
+    ):
 
         if other_id == player_id:
             continue
 
         try:
 
-            await player["websocket"].send_text(message)
+            await player[
+                "websocket"
+            ].send_text(message)
 
         except Exception:
 
-            disconnected.append(other_id)
-
+            disconnected.append(
+                other_id
+            )
 
     for other_id in disconnected:
 
@@ -153,7 +494,14 @@ async def broadcast_player_joined(
             del players[other_id]
 
 
-async def heartbeat(player_id, websocket):
+# ============================================================
+# Heartbeat
+# ============================================================
+
+async def heartbeat(
+    player_id,
+    websocket
+):
 
     while True:
 
@@ -162,6 +510,7 @@ async def heartbeat(player_id, websocket):
         )
 
         if player_id not in players:
+
             return
 
         try:
@@ -186,71 +535,210 @@ async def heartbeat(player_id, websocket):
 
             return
 
+
 # ============================================================
 # WebSocket
 # ============================================================
 
 @app.websocket("/ws")
-async def websocket_endpoint(websocket: WebSocket):
+async def websocket_endpoint(
+    websocket: WebSocket
+):
 
     await websocket.accept()
 
-    player_id = None
+    connection_id = None
+
+    account_id = None
+
     heartbeat_task = None
 
     try:
 
         # ====================================================
-        # Чекаємо реєстрацію
+        # Авторизація
         # ====================================================
 
         message = await websocket.receive_text()
 
         data = json.loads(message)
 
+        message_type = data.get("t")
 
-        if data.get("t") != "r":
+
+        # ====================================================
+        # REGISTER
+        # ====================================================
+
+        if message_type == "register":
+
+            nickname = str(
+                data.get("n", "")
+            ).strip()
+
+            password = str(
+                data.get("p", "")
+            )
+
+
+            if not nickname:
+
+                await websocket.send_text(
+                    json.dumps({
+                        "t": "auth_error",
+                        "e": "empty_nickname"
+                    })
+                )
+
+                await websocket.close()
+
+                return
+
+
+            if len(nickname) > 15:
+
+                await websocket.send_text(
+                    json.dumps({
+                        "t": "auth_error",
+                        "e": "nickname_too_long"
+                    })
+                )
+
+                await websocket.close()
+
+                return
+
+
+            if not password:
+
+                await websocket.send_text(
+                    json.dumps({
+                        "t": "auth_error",
+                        "e": "empty_password"
+                    })
+                )
+
+                await websocket.close()
+
+                return
+
+
+            result = create_account(
+                nickname,
+                password
+            )
+
+
+            if not result["success"]:
+
+                await websocket.send_text(
+                    json.dumps({
+                        "t": "auth_error",
+                        "e": result["error"]
+                    })
+                )
+
+                await websocket.close()
+
+                return
+
+
+            account_id = result["id"]
+
+            money = result["money"]
+
+            x = result["x"]
+
+            y = result["y"]
+
+
+        # ====================================================
+        # LOGIN
+        # ====================================================
+
+        elif message_type == "login":
+
+            nickname = str(
+                data.get("n", "")
+            ).strip()
+
+            password = str(
+                data.get("p", "")
+            )
+
+
+            result = login_account(
+                nickname,
+                password
+            )
+
+
+            if not result["success"]:
+
+                await websocket.send_text(
+                    json.dumps({
+                        "t": "auth_error",
+                        "e": result["error"]
+                    })
+                )
+
+                await websocket.close()
+
+                return
+
+
+            account_id = result["id"]
+
+            money = result["money"]
+
+            x = result["x"]
+
+            y = result["y"]
+
+
+        else:
 
             await websocket.close()
 
             return
 
 
-        nickname = str(
-            data.get("n", "Player")
-        )[:10]
+        # ====================================================
+        # Отримуємо тимчасовий WebSocket ID
+        # ====================================================
+
+        connection_id = get_player_id()
 
 
         # ====================================================
-        # Отримуємо найменший вільний ID
+        # Створюємо онлайн-гравця
         # ====================================================
 
-        player_id = get_player_id()
-
-
-        # ====================================================
-        # Створюємо гравця
-        # ====================================================
-
-        players[player_id] = {
+        players[connection_id] = {
 
             "websocket": websocket,
 
+            "account_id": account_id,
+
             "nickname": nickname,
 
-            "x": 640,
+            "money": money,
 
-            "y": 360
+            "x": x,
+
+            "y": y
         }
 
 
         print(
-            f"Player {player_id} connected as {nickname}"
+            f"Player {connection_id} "
+            f"(account {account_id}) "
+            f"connected as {nickname}"
         )
 
 
         # ====================================================
-        # Відправляємо ID
+        # Відправляємо дані власнику
         # ====================================================
 
         await websocket.send_text(
@@ -258,7 +746,12 @@ async def websocket_endpoint(websocket: WebSocket):
             json.dumps(
                 {
                     "t": "w",
-                    "i": player_id
+                    "i": connection_id,
+                    "a": account_id,
+                    "n": nickname,
+                    "m": money,
+                    "x": x,
+                    "y": y
                 },
                 separators=(",", ":")
             )
@@ -266,8 +759,7 @@ async def websocket_endpoint(websocket: WebSocket):
 
 
         # ====================================================
-        # Відправляємо новому гравцю
-        # існуючих гравців
+        # Існуючі гравці
         # ====================================================
 
         existing_players = []
@@ -275,8 +767,10 @@ async def websocket_endpoint(websocket: WebSocket):
 
         for other_id, player in players.items():
 
-            if other_id == player_id:
+            if other_id == connection_id:
+
                 continue
+
 
             existing_players.append(
                 {
@@ -301,19 +795,24 @@ async def websocket_endpoint(websocket: WebSocket):
 
 
         # ====================================================
-        # Повідомляємо інших про нового
+        # Повідомляємо інших
         # ====================================================
 
         await broadcast_player_joined(
-            player_id,
+            connection_id,
             nickname,
-            640,
-            360
+            x,
+            y
         )
+
+
+        # ====================================================
+        # Heartbeat
+        # ====================================================
 
         heartbeat_task = asyncio.create_task(
             heartbeat(
-                player_id,
+                connection_id,
                 websocket
             )
         )
@@ -331,6 +830,15 @@ async def websocket_endpoint(websocket: WebSocket):
 
 
             # =================================================
+            # Heartbeat response
+            # =================================================
+
+            if data.get("t") == "a":
+
+                continue
+
+
+            # =================================================
             # Позиція
             # =================================================
 
@@ -345,18 +853,22 @@ async def websocket_endpoint(websocket: WebSocket):
                 )
 
 
-                # Перевіряємо, що гравець ще існує
+                if connection_id not in players:
 
-                if player_id not in players:
                     break
 
 
-                players[player_id]["x"] = x
-                players[player_id]["y"] = y
+                players[
+                    connection_id
+                ]["x"] = x
+
+                players[
+                    connection_id
+                ]["y"] = y
 
 
                 await broadcast_position(
-                    player_id,
+                    connection_id,
                     x,
                     y
                 )
@@ -365,14 +877,14 @@ async def websocket_endpoint(websocket: WebSocket):
     except WebSocketDisconnect:
 
         print(
-            f"Player {player_id} disconnected"
+            f"Player {connection_id} disconnected"
         )
 
 
     except Exception as e:
 
         print(
-            f"Player {player_id} error:",
+            f"Player {connection_id} error:",
             e
         )
 
@@ -383,27 +895,48 @@ async def websocket_endpoint(websocket: WebSocket):
 
             heartbeat_task.cancel()
 
-        # ====================================================
-        # Видаляємо гравця
-        # ====================================================
 
-        if player_id is not None:
+        if connection_id is not None:
 
-            if player_id in players:
+            if connection_id in players:
 
-                del players[player_id]
+                player = players[
+                    connection_id
+                ]
 
-                print(
-                    f"Player {player_id} removed"
+
+                # ============================================
+                # Зберігаємо дані в БД
+                # ============================================
+
+                save_player(
+
+                    player["account_id"],
+
+                    player["money"],
+
+                    player["x"],
+
+                    player["y"]
                 )
 
 
                 # ============================================
-                # Миттєво повідомляємо інших
+                # Видаляємо онлайн-гравця
                 # ============================================
 
+                del players[
+                    connection_id
+                ]
+
+
+                print(
+                    f"Player {connection_id} removed"
+                )
+
+
                 await broadcast_player_left(
-                    player_id
+                    connection_id
                 )
 
 
@@ -425,6 +958,9 @@ def home():
 # ============================================================
 
 if __name__ == "__main__":
+
+    init_database()
+
 
     port = int(
         os.environ.get(
