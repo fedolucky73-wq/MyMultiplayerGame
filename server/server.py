@@ -1,6 +1,7 @@
 import json
 import os
 import asyncio
+import math
 
 import psycopg2
 from psycopg2.extras import RealDictCursor
@@ -86,6 +87,42 @@ def get_player_id():
         player_id += 1
 
     return player_id
+
+
+# ============================================================
+# Монети (кинуті гроші)
+#
+# Зберігаються тільки в пам'яті — це відповідає тому, як
+# клієнт (main.py) працює з монетами: coins = {} з тим самим
+# форматом {id: {"x":.., "y":..}}.
+# ============================================================
+
+coins = {}
+
+next_coin_id = 1
+
+COIN_DROP_COST = 5
+
+# На скільки пікселів монета відлітає від гравця
+# у напрямку курсора (dx, dy з клієнта)
+COIN_DROP_DISTANCE = 60
+
+# Максимальна дистанція, з якої сервер приймає "collect".
+# Трохи більша за клієнтську COIN_PICKUP_DISTANCE
+# (PLAYER_SIZE/2 + COIN_RADIUS + 4 = 36), щоб не відхиляти
+# легітимні підбори через затримку мережі (лаг).
+COIN_PICKUP_DISTANCE = 60
+
+
+def get_coin_id():
+
+    global next_coin_id
+
+    coin_id = next_coin_id
+
+    next_coin_id += 1
+
+    return coin_id
 
 
 # ============================================================
@@ -256,7 +293,8 @@ def login_user(nickname, password):
 def save_user_position(
     account_id,
     x,
-    y
+    y,
+    money
 ):
 
     connection = get_db_connection()
@@ -271,7 +309,8 @@ def save_user_position(
 
             SET
                 x = %s,
-                y = %s
+                y = %s,
+                money = %s
 
             WHERE id = %s
             """,
@@ -279,6 +318,7 @@ def save_user_position(
             (
                 x,
                 y,
+                money,
                 account_id
             )
         )
@@ -364,7 +404,8 @@ async def remove_player(player_id):
         save_user_position(
             player["account_id"],
             player["x"],
-            player["y"]
+            player["y"],
+            player["money"]
         )
 
     except Exception as e:
@@ -489,6 +530,100 @@ async def broadcast_player_joined(
         if other_id in players:
 
             del players[other_id]
+
+
+# ============================================================
+# З'явилась нова монета (усім гравцям)
+# ============================================================
+
+async def broadcast_new_coin(
+    coin_id,
+    x,
+    y
+):
+
+    message = json.dumps(
+        {
+            "t": "c",
+            "i": coin_id,
+            "x": x,
+            "y": y
+        },
+        separators=(",", ":")
+    )
+
+
+    disconnected = []
+
+
+    for player_id, player in list(
+        players.items()
+    ):
+
+        try:
+
+            await player[
+                "websocket"
+            ].send_text(message)
+
+
+        except Exception:
+
+            disconnected.append(
+                player_id
+            )
+
+
+    for player_id in disconnected:
+
+        if player_id in players:
+
+            del players[player_id]
+
+
+# ============================================================
+# Монету підібрали — прибрати в усіх
+# ============================================================
+
+async def broadcast_coin_removed(
+    coin_id
+):
+
+    message = json.dumps(
+        {
+            "t": "cr",
+            "i": coin_id
+        },
+        separators=(",", ":")
+    )
+
+
+    disconnected = []
+
+
+    for player_id, player in list(
+        players.items()
+    ):
+
+        try:
+
+            await player[
+                "websocket"
+            ].send_text(message)
+
+
+        except Exception:
+
+            disconnected.append(
+                player_id
+            )
+
+
+    for player_id in disconnected:
+
+        if player_id in players:
+
+            del players[player_id]
 
 
 # ============================================================
@@ -772,7 +907,9 @@ async def websocket_endpoint(
 
             "x": user["x"],
 
-            "y": user["y"]
+            "y": user["y"],
+
+            "money": user["money"]
         }
 
 
@@ -843,6 +980,35 @@ async def websocket_endpoint(
                 {
                     "t": "s",
                     "p": existing_players
+                },
+
+                separators=(",", ":")
+            )
+        )
+
+
+        # ====================================================
+        # Активні монети (актуальний стан)
+        # ====================================================
+
+        active_coins = [
+
+            {
+                "i": coin_id,
+                "x": coin["x"],
+                "y": coin["y"]
+            }
+
+            for coin_id, coin in coins.items()
+        ]
+
+
+        await websocket.send_text(
+
+            json.dumps(
+                {
+                    "t": "cs",
+                    "c": active_coins
                 },
 
                 separators=(",", ":")
@@ -972,6 +1138,199 @@ async def websocket_endpoint(
 
                     y
                 )
+
+                continue
+
+
+            # =================================================
+            # Викинути гроші (5) у напрямку курсора
+            # =================================================
+
+            if message_type == "drop":
+
+                if player_id not in players:
+                    break
+
+
+                try:
+
+                    dx = float(
+                        data.get("dx", 0)
+                    )
+
+                    dy = float(
+                        data.get("dy", 0)
+                    )
+
+                except (TypeError, ValueError):
+
+                    continue
+
+
+                current_money = players[
+                    player_id
+                ]["money"]
+
+
+                if current_money < COIN_DROP_COST:
+
+                    await websocket.send_text(
+                        json.dumps(
+                            {
+                                "t": "drop_error",
+                                "m": "Not enough money"
+                            },
+                            separators=(",", ":")
+                        )
+                    )
+
+                    continue
+
+
+                # ========================================
+                # Нормалізуємо напрямок
+                # ========================================
+
+                length = math.sqrt(
+                    dx * dx + dy * dy
+                )
+
+                if length == 0:
+
+                    norm_dx, norm_dy = 1.0, 0.0
+
+                else:
+
+                    norm_dx = dx / length
+                    norm_dy = dy / length
+
+
+                player_x = players[player_id]["x"]
+                player_y = players[player_id]["y"]
+
+                coin_x = int(
+                    round(
+                        player_x +
+                        norm_dx * COIN_DROP_DISTANCE
+                    )
+                )
+
+                coin_y = int(
+                    round(
+                        player_y +
+                        norm_dy * COIN_DROP_DISTANCE
+                    )
+                )
+
+                # Ті самі межі світу, що й для позиції гравця
+                coin_x = max(25, min(1255, coin_x))
+                coin_y = max(25, min(695, coin_y))
+
+
+                # ========================================
+                # Списуємо гроші та створюємо монету
+                # ========================================
+
+                players[player_id]["money"] = (
+                    current_money - COIN_DROP_COST
+                )
+
+                coin_id = get_coin_id()
+
+                coins[coin_id] = {
+                    "x": coin_x,
+                    "y": coin_y
+                }
+
+
+                await websocket.send_text(
+                    json.dumps(
+                        {
+                            "t": "money",
+                            "money": players[
+                                player_id
+                            ]["money"]
+                        },
+                        separators=(",", ":")
+                    )
+                )
+
+                await broadcast_new_coin(
+                    coin_id,
+                    coin_x,
+                    coin_y
+                )
+
+                continue
+
+
+            # =================================================
+            # Гравець підібрав монету
+            # =================================================
+
+            if message_type == "collect":
+
+                if player_id not in players:
+                    break
+
+
+                coin_id = data.get("i")
+
+                coin = coins.get(coin_id)
+
+                if coin is None:
+
+                    # Монету вже підібрав хтось інший —
+                    # просто ігноруємо
+                    continue
+
+
+                # ========================================
+                # Захист від "телепортного" підбору:
+                # перевіряємо реальну відстань гравця
+                # до монети за координатами на сервері
+                # ========================================
+
+                player_x = players[player_id]["x"]
+                player_y = players[player_id]["y"]
+
+                distance = math.hypot(
+                    player_x - coin["x"],
+                    player_y - coin["y"]
+                )
+
+                if distance > COIN_PICKUP_DISTANCE:
+
+                    continue
+
+
+                # Прибираємо монету саме зараз,
+                # щоб два гравці не забрали її одночасно
+
+                del coins[coin_id]
+
+                players[player_id]["money"] += (
+                    COIN_DROP_COST
+                )
+
+
+                await broadcast_coin_removed(
+                    coin_id
+                )
+
+                await websocket.send_text(
+                    json.dumps(
+                        {
+                            "t": "money",
+                            "money": players[
+                                player_id
+                            ]["money"]
+                        },
+                        separators=(",", ":")
+                    )
+                )
+
+                continue
 
 
     except WebSocketDisconnect:

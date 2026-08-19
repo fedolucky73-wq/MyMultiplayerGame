@@ -95,12 +95,29 @@ my_id = None
 player_x = WIDTH / 2
 player_y = HEIGHT / 2
 
+money = 0
+
 
 # ============================================================
 # Інші гравці
 # ============================================================
 
 other_players = {}
+
+
+# ============================================================
+# Монети (кинуті гроші)
+# ============================================================
+
+coins = {}
+
+COIN_RADIUS = 7
+
+COIN_DROP_COST = 5
+
+COIN_PICKUP_DISTANCE = PLAYER_SIZE / 2 + COIN_RADIUS + 4
+
+pending_collect = set()
 
 
 # ============================================================
@@ -157,11 +174,16 @@ def receive_messages(socket_connection):
     global auth_mode
     global nickname
     global auth_waiting
+    global auth_pending
     global registration_reconnect
     global auth_message
 
     global player_x
     global player_y
+
+    global money
+    global coins
+    global pending_collect
 
     try:
 
@@ -206,6 +228,8 @@ def receive_messages(socket_connection):
 
                 player_x = data["x"]
                 player_y = data["y"]
+
+                money = data["money"]
 
                 continue
 
@@ -266,6 +290,90 @@ def receive_messages(socket_connection):
                 except:
 
                     pass
+
+                continue
+
+
+            # =================================================
+            # Оновлення суми грошей (після drop / collect)
+            # =================================================
+
+            if message_type == "money":
+
+                money = data.get(
+                    "money",
+                    money
+                )
+
+                continue
+
+
+            # =================================================
+            # Помилка при спробі викинути гроші
+            # =================================================
+
+            if message_type == "drop_error":
+
+                print(
+                    "Drop error:",
+                    data.get("m", "Unknown error")
+                )
+
+                continue
+
+
+            # =================================================
+            # Початковий список активних монет
+            # (після логіну / reconnect)
+            # =================================================
+
+            if message_type == "cs":
+
+                new_coins = {}
+
+                for coin in data.get("c", []):
+
+                    new_coins[coin["i"]] = {
+                        "x": coin["x"],
+                        "y": coin["y"]
+                    }
+
+                coins.clear()
+                coins.update(new_coins)
+
+                pending_collect.clear()
+
+                continue
+
+
+            # =================================================
+            # З'явилась нова монета
+            # =================================================
+
+            if message_type == "c":
+
+                coins[data["i"]] = {
+                    "x": data["x"],
+                    "y": data["y"]
+                }
+
+                continue
+
+
+            # =================================================
+            # Монету підібрали (видалити у всіх)
+            # =================================================
+
+            if message_type == "cr":
+
+                coins.pop(
+                    data.get("i"),
+                    None
+                )
+
+                pending_collect.discard(
+                    data.get("i")
+                )
 
                 continue
 
@@ -397,6 +505,21 @@ def receive_messages(socket_connection):
         if ws is socket_connection:
 
             connected = False
+
+            # ================================================
+            # Якщо з'єднання розірвалось саме тоді, коли ми
+            # чекали відповідь на login/register (auth_waiting
+            # було True) — запит фактично "загубився":
+            # сервер міг його не отримати або відповідь не
+            # дійшла. Позначаємо auth_pending, щоб
+            # reconnect_loop() автоматично повторив цей самий
+            # запит після відновлення з'єднання, а не чекав
+            # повторного натискання ENTER користувачем.
+            # ================================================
+
+            if auth_waiting and not registration_done:
+                auth_pending = True
+
             auth_waiting = False
 
             try:
@@ -415,8 +538,11 @@ def connect_to_server(auto_login=False):
     global connected
     global my_id
     global other_players
+    global coins
+    global pending_collect
     global auth_waiting
     global auth_pending
+    global auth_mode
 
     try:
 
@@ -449,10 +575,16 @@ def connect_to_server(auto_login=False):
 
 
         # ====================================================
-        # Очищаємо старих гравців
+        # Очищаємо старих гравців та монети
+        # (актуальний список монет прийде через "cs"
+        # одразу після успішного логіну)
         # ====================================================
 
         other_players.clear()
+
+        coins.clear()
+
+        pending_collect.clear()
 
 
         print(
@@ -489,10 +621,22 @@ def connect_to_server(auto_login=False):
 
             try:
 
+                # ====================================================
+                # Для reconnect вже залогіненого гравця (auto_login)
+                # завжди повторюємо саме "login". Але якщо реконект
+                # стався ще на екрані логіну/реєстрації (auth_pending),
+                # повторюємо той самий запит, який надсилав користувач
+                # (login або register) — а не завжди "login".
+                # ====================================================
+
+                request_type = (
+                    "login" if auto_login else auth_mode
+                )
+
                 new_ws.send(
                     json.dumps(
                         {
-                            "t": "login",
+                            "t": request_type,
                             "n": nickname,
                             "p": password
                         },
@@ -538,22 +682,25 @@ def send_auth():
     global auth_pending
     global connected
 
-    # Якщо socket ще не готовий —
-    # запам'ятовуємо запит.
+    if not nickname:
+        return
+
+    if not password:
+        return
+
+    # ============================================
+    # Якщо socket відсутній —
+    # запам'ятовуємо LOGIN.
+    # ============================================
+
     if not connected:
 
         auth_pending = True
 
         print(
-            "Authentication queued. Waiting for connection..."
+            "Login queued. Waiting for connection..."
         )
 
-        return
-
-    if not nickname:
-        return
-
-    if not password:
         return
 
     try:
@@ -599,6 +746,7 @@ def reconnect_loop():
     global reconnecting
     global registration_reconnect
     global auth_waiting
+    global auth_pending
 
     while running:
 
@@ -658,13 +806,19 @@ def reconnect_loop():
                         "Authentication socket restored."
                     )
 
+                    # ============================================
+                    # Якщо користувач уже натиснув ENTER,
+                    # поки socket був відсутній —
+                    # автоматично повторюємо LOGIN.
+                    # ============================================
+
                 else:
 
                     print(
                         "Authentication reconnect failed. Retrying..."
                     )
 
-                    pygame.time.wait(1000)
+                    pygame.time.wait(500)
 
 
                 reconnecting = False
@@ -775,6 +929,74 @@ def send_position():
         )
 
         connected = False
+
+
+# ============================================================
+# Викинути гроші (5) у напрямку курсора
+# ============================================================
+
+def send_drop():
+
+    global ws
+    global connected
+    global money
+
+    if not connected:
+        return
+
+    if not registration_done:
+        return
+
+    if money < COIN_DROP_COST:
+
+        print(
+            "Not enough money to drop"
+        )
+
+        return
+
+
+    # ========================================================
+    # Напрямок від гравця до курсора миші.
+    # Сам курсор і world-координати збігаються 1:1,
+    # оскільки камера не зміщується.
+    # ========================================================
+
+    mouse_x, mouse_y = pygame.mouse.get_pos()
+
+    dx = mouse_x - player_x
+    dy = mouse_y - player_y
+
+    try:
+
+        message = json.dumps(
+
+            {
+                "t": "drop",
+                "dx": dx,
+                "dy": dy
+            },
+
+            separators=(",", ":")
+        )
+
+        ws.send(message)
+
+        print(
+            "Dropped",
+            COIN_DROP_COST,
+            "money"
+        )
+
+    except Exception as e:
+
+        print(
+            "Drop send error:",
+            e
+        )
+
+        connected = False
+
 
 send_timer = 0.0
 
@@ -926,6 +1148,19 @@ while running:
                         if len(password) < 64:
 
                             password += event.unicode
+
+
+        # ====================================================
+        # Гра: викинути гроші (Q)
+        # ====================================================
+
+        else:
+
+            if event.type == pygame.KEYDOWN:
+
+                if event.key == pygame.K_q:
+
+                    send_drop()
 
 
     # ========================================================
@@ -1372,6 +1607,48 @@ while running:
 
 
     # ========================================================
+    # Підбір монет (дотик гравця до кульки)
+    # ========================================================
+
+    if connected and registration_done:
+
+        for coin_id, coin in list(coins.items()):
+
+            if coin_id in pending_collect:
+                continue
+
+            distance = math.hypot(
+                player_x - coin["x"],
+                player_y - coin["y"]
+            )
+
+            if distance <= COIN_PICKUP_DISTANCE:
+
+                pending_collect.add(coin_id)
+
+                try:
+
+                    ws.send(
+                        json.dumps(
+                            {
+                                "t": "collect",
+                                "i": coin_id
+                            },
+                            separators=(",", ":")
+                        )
+                    )
+
+                except Exception as e:
+
+                    print(
+                        "Collect send error:",
+                        e
+                    )
+
+                    pending_collect.discard(coin_id)
+
+
+    # ========================================================
     # Плавність інших гравців
     # ========================================================
 
@@ -1403,6 +1680,27 @@ while running:
     screen.fill(
         (30, 30, 30)
     )
+
+
+    # ========================================================
+    # Монети
+    # ========================================================
+
+    for coin_id, coin in coins.items():
+
+        pygame.draw.circle(
+
+            screen,
+
+            (255, 215, 0),
+
+            (
+                int(coin["x"]),
+                int(coin["y"])
+            ),
+
+            COIN_RADIUS
+        )
 
 
     # ========================================================
@@ -1562,6 +1860,22 @@ while running:
         status_text,
 
         (10, 10)
+    )
+
+
+    # ========================================================
+    # Гроші
+    # ========================================================
+
+    money_text = font.render(
+        f"Money: {money}",
+        True,
+        (255, 215, 0)
+    )
+
+    screen.blit(
+        money_text,
+        (10, 40)
     )
 
 
