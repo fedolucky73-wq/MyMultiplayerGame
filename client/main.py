@@ -54,8 +54,17 @@ input_font = pygame.font.SysFont(
 # ============================================================
 
 nickname = ""
+password = ""
 
 registration_done = False
+
+auth_mode = "login"
+
+auth_message = ""
+
+auth_waiting = False
+
+input_field = "nickname"
 
 
 # ============================================================
@@ -123,6 +132,16 @@ def receive_messages(socket_connection):
     global connected
     global other_players
 
+    global registration_done
+    global password
+    global auth_mode
+    global nickname
+    global auth_waiting
+    global auth_message
+
+    global player_x
+    global player_y
+
     try:
 
         while True:
@@ -135,6 +154,79 @@ def receive_messages(socket_connection):
             data = json.loads(message)
 
             message_type = data.get("t")
+
+            # =================================================
+            # Успішний вхід
+            # =================================================
+
+            if message_type == "w":
+
+                my_id = data["i"]
+
+                nickname = data["n"]
+
+                print(
+                    "Logged in as:",
+                    nickname
+                )
+
+                print(
+                    "Your ID:",
+                    my_id
+                )
+
+                print(
+                    "Money:",
+                    data["money"]
+                )
+
+                registration_done = True
+                auth_waiting = False
+
+                player_x = data["x"]
+                player_y = data["y"]
+
+                continue
+
+
+            # =================================================
+            # Успішна реєстрація
+            # =================================================
+
+            if message_type == "registered":
+
+                auth_message = (
+                    "Account created! Please login."
+                )
+
+                auth_mode = "login"
+
+                auth_waiting = False
+
+                password = ""
+
+                continue
+
+
+            # =================================================
+            # Помилка авторизації
+            # =================================================
+
+            if message_type == "error":
+
+                auth_message = data.get(
+                    "m",
+                    "Unknown error"
+                )
+
+                auth_waiting = False
+
+                print(
+                    "Server:",
+                    auth_message
+                )
+
+                continue
 
             # =================================================
             # Heartbeat від сервера
@@ -153,19 +245,6 @@ def receive_messages(socket_connection):
                     pass
 
                 continue
-
-            # =================================================
-            # Наш ID
-            # =================================================
-
-            if message_type == "w":
-
-                my_id = data["i"]
-
-                print(
-                    "Your ID:",
-                    my_id
-                )
 
 
             # =================================================
@@ -306,12 +385,13 @@ def receive_messages(socket_connection):
 # Підключення
 # ============================================================
 
-def connect_to_server():
+def connect_to_server(auto_login=False):
 
     global ws
     global connected
     global my_id
     global other_players
+    global auth_waiting
 
     try:
 
@@ -355,25 +435,8 @@ def connect_to_server():
         )
 
 
-        # ====================================================
-        # Реєстрація
-        # ====================================================
-
-        new_ws.send(
-
-            json.dumps(
-                {
-                    "t": "r",
-                    "n": nickname
-                },
-                separators=(",", ":")
-            )
-        )
-
-
         print(
-            "Registered as:",
-            nickname
+            "Authentication socket ready."
         )
 
 
@@ -393,6 +456,31 @@ def connect_to_server():
         thread.start()
 
 
+        if auto_login and nickname and password:
+
+            try:
+
+                new_ws.send(
+                    json.dumps(
+                        {
+                            "t": "login",
+                            "n": nickname,
+                            "p": password
+                        },
+                        separators=(",", ":")
+                    )
+                )
+
+                auth_waiting = True
+
+            except Exception as e:
+
+                print(
+                    "Reconnect login error:",
+                    e
+                )
+
+
         return True
 
 
@@ -407,6 +495,49 @@ def connect_to_server():
 
         return False
 
+
+def send_auth():
+
+    global auth_waiting
+
+    if not connected:
+        return
+
+    if not nickname:
+        return
+
+    if not password:
+        return
+
+    try:
+
+        message = {
+            "t": auth_mode,
+            "n": nickname,
+            "p": password
+        }
+
+        ws.send(
+            json.dumps(
+                message,
+                separators=(",", ":")
+            )
+        )
+
+        auth_waiting = True
+
+        print(
+            "Sending",
+            auth_mode,
+            "request..."
+        )
+
+    except Exception as e:
+
+        print(
+            "Auth error:",
+            e
+        )
 
 # ============================================================
 # Reconnect
@@ -443,7 +574,7 @@ def reconnect_loop():
             )
 
 
-            success = connect_to_server()
+            success = connect_to_server(auto_login=True)
 
 
             if success:
@@ -520,11 +651,6 @@ def send_position():
 
         connected = False
 
-
-# ============================================================
-# Головний цикл
-# ============================================================
-
 send_timer = 0.0
 
 was_moving = False
@@ -532,6 +658,18 @@ was_moving = False
 last_sent_x = None
 last_sent_y = None
 
+# ============================================================
+# Початкове підключення
+# ============================================================
+
+connect_to_server()
+
+reconnect_thread = threading.Thread(
+    target=reconnect_loop,
+    daemon=True
+)
+
+reconnect_thread.start()
 
 # ============================================================
 # Головний цикл
@@ -561,53 +699,95 @@ while running:
 
             if event.type == pygame.KEYDOWN:
 
-                # --------------------------------------------
-                # ENTER
-                # --------------------------------------------
+                # =================================================
+                # TAB — перемикання LOGIN / REGISTER
+                # =================================================
 
-                if event.key == pygame.K_RETURN:
+                if event.key == pygame.K_TAB:
 
-                    nickname = nickname.strip()
+                    if auth_mode == "login":
 
+                        auth_mode = "register"
 
-                    if nickname:
+                    else:
 
-                        registration_done = True
-
-                        connect_to_server()
-
-                        reconnect_thread = threading.Thread(
-                            target=reconnect_loop,
-                            daemon=True
-                        )
-
-                        reconnect_thread.start()
+                        auth_mode = "login"
 
 
-                # --------------------------------------------
+                    auth_message = ""
+
+                    password = ""
+
+                    auth_waiting = False
+
+
+                # =================================================
+                # ENTER — відправити
+                # =================================================
+
+                elif event.key == pygame.K_RETURN:
+
+                    if not auth_waiting:
+
+                        send_auth()
+
+
+                # =================================================
                 # BACKSPACE
-                # --------------------------------------------
+                # =================================================
 
                 elif event.key == pygame.K_BACKSPACE:
 
-                    nickname = nickname[:-1]
+                    if input_field == "nickname":
+
+                        nickname = nickname[:-1]
+
+                    else:
+
+                        password = password[:-1]
 
 
-                # --------------------------------------------
+                # =================================================
+                # Перемикання поля
+                # =================================================
+
+                elif event.key == pygame.K_UP:
+
+                    input_field = "nickname"
+
+
+                elif event.key == pygame.K_DOWN:
+
+                    input_field = "password"
+
+
+                # =================================================
                 # Символ
-                # --------------------------------------------
+                # =================================================
 
                 else:
 
-                    if len(nickname) < 10:
+                    if not event.unicode.isprintable():
 
-                        if event.unicode.isprintable():
+                        continue
+
+
+                    if input_field == "nickname":
+
+                        if len(nickname) < 15:
 
                             nickname += event.unicode
 
 
+                    else:
+
+                        if len(password) < 64:
+
+                            password += event.unicode
+
+
     # ========================================================
-    # Екран реєстрації
+    # Екран LOGIN / REGISTER
     # ========================================================
 
     if not registration_done:
@@ -617,73 +797,188 @@ while running:
         )
 
 
+        # ----------------------------------------------------
+        # Заголовок
+        # ----------------------------------------------------
+
+        title_text = (
+            "LOGIN"
+            if auth_mode == "login"
+            else
+            "REGISTER"
+        )
+
+
         title = input_font.render(
-
-            "Enter your nickname:",
-
+            title_text,
             True,
-
             (255, 255, 255)
         )
 
 
         screen.blit(
-
             title,
-
             (
                 WIDTH // 2 -
                 title.get_width() // 2,
-
-                250
+                120
             )
         )
 
 
-        nickname_text = input_font.render(
+        # ----------------------------------------------------
+        # Nickname
+        # ----------------------------------------------------
 
-            nickname,
-
+        nickname_label = font.render(
+            "Nickname:",
             True,
+            (230, 230, 230)
+        )
 
+
+        screen.blit(
+            nickname_label,
+            (
+                WIDTH // 2 - 250,
+                230
+            )
+        )
+
+
+        nickname_display = font.render(
+            nickname,
+            True,
             (255, 255, 255)
         )
 
 
         screen.blit(
-
-            nickname_text,
-
+            nickname_display,
             (
-                WIDTH // 2 -
-                nickname_text.get_width() // 2,
-
-                330
+                WIDTH // 2 - 50,
+                230
             )
         )
 
 
-        info = font.render(
+        # ----------------------------------------------------
+        # Password
+        # ----------------------------------------------------
 
-            f"{len(nickname)}/10   Press ENTER",
-
+        password_label = font.render(
+            "Password:",
             True,
+            (230, 230, 230)
+        )
 
+
+        screen.blit(
+            password_label,
+            (
+                WIDTH // 2 - 250,
+                300
+            )
+        )
+
+
+        password_display = "*" * len(password)
+
+
+        password_text = font.render(
+            password_display,
+            True,
+            (255, 255, 255)
+        )
+
+
+        screen.blit(
+            password_text,
+            (
+                WIDTH // 2 - 50,
+                300
+            )
+        )
+
+
+        # ----------------------------------------------------
+        # Кнопка / підказка
+        # ----------------------------------------------------
+
+        if auth_mode == "login":
+
+            info_text = (
+                "ENTER - Login    TAB - Register"
+            )
+
+        else:
+
+            info_text = (
+                "ENTER - Register    TAB - Login"
+            )
+
+
+        info = font.render(
+            info_text,
+            True,
             (220, 220, 220)
         )
 
 
         screen.blit(
-
             info,
-
             (
                 WIDTH // 2 -
                 info.get_width() // 2,
-
                 400
             )
         )
+
+
+        # ----------------------------------------------------
+        # Повідомлення сервера
+        # ----------------------------------------------------
+
+        if auth_message:
+
+            message_text = font.render(
+                auth_message,
+                True,
+                (255, 220, 100)
+            )
+
+
+            screen.blit(
+                message_text,
+                (
+                    WIDTH // 2 -
+                    message_text.get_width() // 2,
+                    470
+                )
+            )
+
+
+        # ----------------------------------------------------
+        # Очікування
+        # ----------------------------------------------------
+
+        if auth_waiting:
+
+            waiting = font.render(
+                "Connecting...",
+                True,
+                (220, 220, 220)
+            )
+
+
+            screen.blit(
+                waiting,
+                (
+                    WIDTH // 2 -
+                    waiting.get_width() // 2,
+                    520
+                )
+            )
 
 
         pygame.display.flip()
