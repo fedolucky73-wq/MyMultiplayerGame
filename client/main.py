@@ -63,9 +63,28 @@ auth_mode = "login"
 auth_message = ""
 
 auth_waiting = False
+auth_pending = False
 
 input_field = "nickname"
 
+
+# ============================================================
+# Поля вводу
+# ============================================================
+
+nickname_rect = pygame.Rect(
+    WIDTH // 2 - 50,
+    215,
+    350,
+    50
+)
+
+password_rect = pygame.Rect(
+    WIDTH // 2 - 50,
+    285,
+    350,
+    50
+)
 
 # ============================================================
 # Мій гравець
@@ -95,6 +114,7 @@ connected = False
 reconnect_lock = threading.Lock()
 
 reconnecting = False
+registration_reconnect = False
 
 
 # ============================================================
@@ -137,6 +157,7 @@ def receive_messages(socket_connection):
     global auth_mode
     global nickname
     global auth_waiting
+    global registration_reconnect
     global auth_message
 
     global player_x
@@ -204,6 +225,8 @@ def receive_messages(socket_connection):
                 auth_waiting = False
 
                 password = ""
+
+                registration_reconnect = True
 
                 continue
 
@@ -374,6 +397,7 @@ def receive_messages(socket_connection):
         if ws is socket_connection:
 
             connected = False
+            auth_waiting = False
 
             try:
                 socket_connection.close()
@@ -392,6 +416,7 @@ def connect_to_server(auto_login=False):
     global my_id
     global other_players
     global auth_waiting
+    global auth_pending
 
     try:
 
@@ -456,7 +481,11 @@ def connect_to_server(auto_login=False):
         thread.start()
 
 
-        if auto_login and nickname and password:
+        if (
+            (auto_login or auth_pending)
+            and nickname
+            and password
+        ):
 
             try:
 
@@ -472,6 +501,11 @@ def connect_to_server(auto_login=False):
                 )
 
                 auth_waiting = True
+                auth_pending = False
+
+                print(
+                    "Sending login request after reconnect..."
+                )
 
             except Exception as e:
 
@@ -479,6 +513,8 @@ def connect_to_server(auto_login=False):
                     "Reconnect login error:",
                     e
                 )
+
+                auth_pending = True
 
 
         return True
@@ -499,8 +535,19 @@ def connect_to_server(auto_login=False):
 def send_auth():
 
     global auth_waiting
+    global auth_pending
+    global connected
 
+    # Якщо socket ще не готовий —
+    # запам'ятовуємо запит.
     if not connected:
+
+        auth_pending = True
+
+        print(
+            "Authentication queued. Waiting for connection..."
+        )
+
         return
 
     if not nickname:
@@ -525,6 +572,7 @@ def send_auth():
         )
 
         auth_waiting = True
+        auth_pending = False
 
         print(
             "Sending",
@@ -539,6 +587,9 @@ def send_auth():
             e
         )
 
+        auth_pending = True
+        connected = False
+
 # ============================================================
 # Reconnect
 # ============================================================
@@ -546,15 +597,90 @@ def send_auth():
 def reconnect_loop():
 
     global reconnecting
+    global registration_reconnect
+    global auth_waiting
 
     while running:
 
-        if not registration_done:
+        # ====================================================
+        # Після успішної реєстрації потрібно створити
+        # нове з'єднання для входу
+        # ====================================================
 
-            pygame.time.wait(500)
+        if registration_reconnect:
+
+            registration_reconnect = False
+
+            print(
+                "Registration completed. Reconnecting for login..."
+            )
+
+            auth_waiting = False
+
+            connect_to_server()
 
             continue
 
+
+        # ====================================================
+        # Ми ще на екрані LOGIN / REGISTER
+        #
+        # Якщо сервер закрив socket після помилки —
+        # автоматично створюємо новий socket.
+        # ====================================================
+
+        if not registration_done:
+
+            if not connected:
+
+                with reconnect_lock:
+
+                    if reconnecting:
+
+                        pygame.time.wait(100)
+
+                        continue
+
+                    reconnecting = True
+
+
+                print(
+                    "Authentication connection lost. Reconnecting..."
+                )
+
+                auth_waiting = False
+
+                success = connect_to_server()
+
+                if success:
+
+                    print(
+                        "Authentication socket restored."
+                    )
+
+                else:
+
+                    print(
+                        "Authentication reconnect failed. Retrying..."
+                    )
+
+                    pygame.time.wait(1000)
+
+
+                reconnecting = False
+
+            else:
+
+                pygame.time.wait(100)
+
+            continue
+
+
+        # ====================================================
+        # Гравець вже увійшов.
+        # Якщо з'єднання втрачено — робимо reconnect
+        # і автоматично повторюємо LOGIN.
+        # ====================================================
 
         if not connected:
 
@@ -573,9 +699,9 @@ def reconnect_loop():
                 "Connection lost. Reconnecting..."
             )
 
-
-            success = connect_to_server(auto_login=True)
-
+            success = connect_to_server(
+                auto_login=True
+            )
 
             if success:
 
@@ -593,7 +719,6 @@ def reconnect_loop():
 
 
             reconnecting = False
-
 
         else:
 
@@ -696,6 +821,23 @@ while running:
         # ====================================================
 
         if not registration_done:
+
+            if event.type == pygame.MOUSEBUTTONDOWN:
+
+                if event.button == 1:
+
+                    if nickname_rect.collidepoint(event.pos):
+
+                        input_field = "nickname"
+
+                        auth_message = ""
+
+
+                    elif password_rect.collidepoint(event.pos):
+
+                        input_field = "password"
+
+                        auth_message = ""
 
             if event.type == pygame.KEYDOWN:
 
@@ -846,6 +988,45 @@ while running:
         )
 
 
+        # ----------------------------------------------------
+        # Поле Nickname
+        # ----------------------------------------------------
+
+        nickname_background = pygame.Surface(
+            nickname_rect.size,
+            pygame.SRCALPHA
+        )
+
+        nickname_background.fill(
+            (50, 50, 50, 180)
+        )
+
+        screen.blit(
+            nickname_background,
+            nickname_rect.topleft
+        )
+
+
+        nickname_border_color = (
+
+            (255, 255, 255)
+
+            if input_field == "nickname"
+
+            else
+
+            (130, 130, 130)
+        )
+
+
+        pygame.draw.rect(
+            screen,
+            nickname_border_color,
+            nickname_rect,
+            3
+        )
+
+
         nickname_display = font.render(
             nickname,
             True,
@@ -856,8 +1037,8 @@ while running:
         screen.blit(
             nickname_display,
             (
-                WIDTH // 2 - 50,
-                230
+                nickname_rect.x + 12,
+                nickname_rect.y + 8
             )
         )
 
@@ -882,6 +1063,45 @@ while running:
         )
 
 
+        # ----------------------------------------------------
+        # Поле Password
+        # ----------------------------------------------------
+
+        password_background = pygame.Surface(
+            password_rect.size,
+            pygame.SRCALPHA
+        )
+
+        password_background.fill(
+            (50, 50, 50, 180)
+        )
+
+        screen.blit(
+            password_background,
+            password_rect.topleft
+        )
+
+
+        password_border_color = (
+
+            (255, 255, 255)
+
+            if input_field == "password"
+
+            else
+
+            (130, 130, 130)
+        )
+
+
+        pygame.draw.rect(
+            screen,
+            password_border_color,
+            password_rect,
+            3
+        )
+
+
         password_display = "*" * len(password)
 
 
@@ -895,8 +1115,8 @@ while running:
         screen.blit(
             password_text,
             (
-                WIDTH // 2 - 50,
-                300
+                password_rect.x + 12,
+                password_rect.y + 8
             )
         )
 
